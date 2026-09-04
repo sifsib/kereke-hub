@@ -101,9 +101,10 @@ function classStateOf(d: Record<string, unknown>, typeId: string): { status: str
   return { status: "not_started", date: "" };
 }
 
-// Members for the caller's scope. Cell leaders are always pinned to their own
-// region; branch admins to their branch; otherwise the chosen scope (or all).
-async function loadMembers(ctx: ReportContext) {
+// Members for the caller's scope, including suspended ones. Cell leaders are
+// always pinned to their own region; branch admins to their branch; otherwise
+// the chosen scope (or all).
+async function loadMembersRaw(ctx: ReportContext) {
   const filters = [where("tenantId", "==", ctx.tenantId)];
   if (ctx.role === "cell_leader" && ctx.region) {
     // A cell leader only ever sees their own group.
@@ -115,9 +116,13 @@ async function loadMembers(ctx: ReportContext) {
     if (ctx.scope) filters.push(where("cellRegion", "==", ctx.scope));
   }
   const snap = await getDocs(query(collection(db, "members"), ...filters));
-  return snap.docs
-    .map((d) => ({ id: d.id, data: d.data() as Record<string, unknown> }))
-    .filter((m) => m.data.status !== "suspended");
+  return snap.docs.map((d) => ({ id: d.id, data: d.data() as Record<string, unknown> }));
+}
+
+// The same, with suspended members dropped (the default for most reports).
+async function loadMembers(ctx: ReportContext) {
+  const all = await loadMembersRaw(ctx);
+  return all.filter((m) => m.data.status !== "suspended");
 }
 
 function inRange(dateStr: string, from: string, to: string): boolean {
@@ -125,6 +130,19 @@ function inRange(dateStr: string, from: string, to: string): boolean {
   if (from && dateStr < from) return false;
   if (to && dateStr > to) return false;
   return true;
+}
+
+// A Firestore Timestamp (or a date string) reduced to YYYY-MM-DD.
+function tsToDate(v: unknown): string {
+  const t = v as { toDate?: () => Date } | undefined;
+  if (t && typeof t.toDate === "function") {
+    try {
+      return t.toDate().toISOString().slice(0, 10);
+    } catch {
+      return "";
+    }
+  }
+  return typeof v === "string" ? v.slice(0, 10) : "";
 }
 
 // ── report definitions ──────────────────────────────────────────────────────
@@ -376,6 +394,284 @@ export const REPORTS: ReportDef[] = [
           { label: "Still open", value: String(open) },
           { label: "From cell groups", value: String(fromCells) },
           { label: "Allocated", value: String(assigned) },
+        ],
+      };
+    },
+  },
+  {
+    id: "growth",
+    title: "Growth",
+    description: "New members joined and members suspended, by month over a period.",
+    group: "People",
+    roles: ["owner", "admin", "member_manager", "member_viewer", "branch_admin", "cell_leader"],
+    dateRange: true,
+    scope: "cellRegion",
+    run: async (ctx) => {
+      const members = await loadMembersRaw(ctx);
+      const byMonth: Record<string, { joined: number; suspended: number }> = {};
+      const bump = (month: string, key: "joined" | "suspended") => {
+        if (!month) return;
+        (byMonth[month] ||= { joined: 0, suspended: 0 })[key] += 1;
+      };
+      let joinedTotal = 0;
+      let suspendedTotal = 0;
+      members.forEach((m) => {
+        const created = tsToDate(m.data.createdAt);
+        if (inRange(created, ctx.from, ctx.to)) {
+          bump(created.slice(0, 7), "joined");
+          joinedTotal += 1;
+        }
+        if (m.data.status === "suspended") {
+          const susp = tsToDate(m.data.suspendedAt);
+          if (inRange(susp, ctx.from, ctx.to)) {
+            bump(susp.slice(0, 7), "suspended");
+            suspendedTotal += 1;
+          }
+        }
+      });
+      const rows: ReportRow[] = Object.entries(byMonth)
+        .map(([month, v]) => ({ month, joined: v.joined, suspended: v.suspended, net: v.joined - v.suspended }))
+        .sort((a, b) => String(a.month).localeCompare(String(b.month)));
+      return {
+        columns: [
+          { key: "month", label: "Month" },
+          { key: "joined", label: "Joined" },
+          { key: "suspended", label: "Suspended" },
+          { key: "net", label: "Net" },
+        ],
+        rows,
+        summary: [
+          { label: "Joined", value: String(joinedTotal) },
+          { label: "Suspended", value: String(suspendedTotal) },
+          { label: "Net", value: String(joinedTotal - suspendedTotal) },
+        ],
+      };
+    },
+  },
+
+  {
+    id: "visitor_pipeline",
+    title: "Visitor Follow-up Pipeline",
+    description: "First-time guests over a period and whether they were followed up.",
+    group: "People",
+    roles: ["owner", "admin", "member_manager", "follow_up"],
+    dateRange: true,
+    scope: "none",
+    run: async (ctx) => {
+      const snap = await getDocs(query(collection(db, "visitors"), where("tenantId", "==", ctx.tenantId)));
+      const all = snap.docs
+        .map((d) => d.data() as Record<string, unknown>)
+        .filter((v) => inRange((v.serviceDate as string) || "", ctx.from, ctx.to));
+      const rows: ReportRow[] = all
+        .map((v) => ({
+          name:
+            (v.fullName as string) ||
+            `${(v.firstName as string) || ""} ${(v.lastName as string) || ""}`.trim() ||
+            "(no name)",
+          serviceDate: (v.serviceDate as string) || "",
+          reason: (v.reason as string) || "",
+          followUp:
+            v.followUpStatus === "done" ? "Followed up" : v.followUpStatus === "none" ? "One-time" : "Pending",
+          followedUpBy: (v.followedUpBy as string) || "",
+        }))
+        .sort((a, b) => String(b.serviceDate).localeCompare(String(a.serviceDate)));
+      const done = all.filter((v) => v.followUpStatus === "done").length;
+      const pending = all.filter((v) => v.followUpStatus === "pending").length;
+      const needing = all.filter((v) => v.followUpStatus !== "none").length;
+      const rate = needing > 0 ? Math.round((done / needing) * 100) : 0;
+      return {
+        columns: [
+          { key: "name", label: "Guest" },
+          { key: "serviceDate", label: "Visited" },
+          { key: "reason", label: "Reason" },
+          { key: "followUp", label: "Follow-up" },
+          { key: "followedUpBy", label: "Followed up by" },
+        ],
+        rows,
+        summary: [
+          { label: "Guests", value: String(all.length) },
+          { label: "Followed up", value: String(done) },
+          { label: "Pending", value: String(pending) },
+          { label: "Follow-up rate", value: `${rate}%` },
+        ],
+      };
+    },
+  },
+
+  {
+    id: "attendance_trend",
+    title: "Attendance Trend",
+    description: "Attendance rate per service date over a period, for your scope.",
+    group: "Attendance",
+    roles: ["owner", "admin", "member_manager", "member_viewer", "branch_admin", "cell_leader"],
+    dateRange: true,
+    scope: "cellRegion",
+    run: async (ctx) => {
+      const members = await loadMembers(ctx);
+      const idSet = new Set(members.map((m) => m.id));
+      const snap = await getDocs(query(collection(db, "attendance"), where("tenantId", "==", ctx.tenantId)));
+      const byDate: Record<string, { present: number; marked: number }> = {};
+      snap.docs.forEach((d) => {
+        const a = d.data() as Record<string, unknown>;
+        const date = (a.serviceDate as string) || "";
+        if (!inRange(date, ctx.from, ctx.to)) return;
+        if (!idSet.has(a.personId as string)) return; // keep it within the caller's scope
+        const b = (byDate[date] ||= { present: 0, marked: 0 });
+        b.marked += 1;
+        if (a.status === "present") b.present += 1;
+      });
+      const rows: ReportRow[] = Object.entries(byDate)
+        .map(([date, v]) => ({
+          date,
+          present: v.present,
+          marked: v.marked,
+          rate: v.marked > 0 ? `${Math.round((v.present / v.marked) * 100)}%` : "0%",
+        }))
+        .sort((a, b) => String(a.date).localeCompare(String(b.date)));
+      const totalPresent = Object.values(byDate).reduce((s, v) => s + v.present, 0);
+      const totalMarked = Object.values(byDate).reduce((s, v) => s + v.marked, 0);
+      const avg = totalMarked > 0 ? Math.round((totalPresent / totalMarked) * 100) : 0;
+      return {
+        columns: [
+          { key: "date", label: "Service Date" },
+          { key: "present", label: "Present" },
+          { key: "marked", label: "Marked" },
+          { key: "rate", label: "Attendance %" },
+        ],
+        rows,
+        summary: [
+          { label: "Services", value: String(rows.length) },
+          { label: "Average attendance", value: `${avg}%` },
+        ],
+      };
+    },
+  },
+
+  {
+    id: "cell_group_scorecard",
+    title: "Cell Group Scorecard",
+    description: "Per group: members, attendance rate, class completions, and (for finance roles) approved offerings.",
+    group: "Cell Groups",
+    roles: ["owner", "admin", "member_manager", "branch_admin", "cell_leader"],
+    dateRange: true,
+    scope: "cellRegion",
+    run: async (ctx) => {
+      const canOfferings = ["owner", "admin", "finance", "finance_viewer"].includes(ctx.role) || ctx.role === "cell_leader";
+      const [tenant, members] = await Promise.all([loadTenant(ctx.tenantId), loadMembers(ctx)]);
+      const types = classesOf(tenant);
+
+      // Per-group members + class completions, and a member -> group map for attendance.
+      const groups: Record<string, { members: number; completed: Record<string, number>; present: number; marked: number; offerings: number }> = {};
+      const groupOf: Record<string, string> = {};
+      const ensure = (g: string) => (groups[g] ||= { members: 0, completed: {}, present: 0, marked: 0, offerings: 0 });
+      members.forEach((m) => {
+        const g = ((m.data.cellRegion as string) || "").trim() || "Unassigned";
+        groupOf[m.id] = g;
+        const row = ensure(g);
+        row.members += 1;
+        types.forEach((t) => {
+          if (classStateOf(m.data, t.id).status === "completed") row.completed[t.id] = (row.completed[t.id] || 0) + 1;
+        });
+      });
+
+      // Attendance within range, tallied to each member's group.
+      const attSnap = await getDocs(query(collection(db, "attendance"), where("tenantId", "==", ctx.tenantId)));
+      attSnap.docs.forEach((d) => {
+        const a = d.data() as Record<string, unknown>;
+        const g = groupOf[a.personId as string];
+        if (!g) return;
+        if (!inRange((a.serviceDate as string) || "", ctx.from, ctx.to)) return;
+        groups[g].marked += 1;
+        if (a.status === "present") groups[g].present += 1;
+      });
+
+      // Approved offerings within range, per group, only where the caller may read them.
+      if (canOfferings) {
+        const offFilters = [where("tenantId", "==", ctx.tenantId)];
+        if (ctx.role === "cell_leader" && ctx.region) offFilters.push(where("cellRegion", "==", ctx.region));
+        else if (ctx.scope) offFilters.push(where("cellRegion", "==", ctx.scope));
+        const offSnap = await getDocs(query(collection(db, "cell_offerings"), ...offFilters));
+        offSnap.docs.forEach((d) => {
+          const o = d.data() as Record<string, unknown>;
+          if (o.status !== "approved") return;
+          if (!inRange((o.date as string) || "", ctx.from, ctx.to)) return;
+          const g = ((o.cellRegion as string) || "").trim() || "Unassigned";
+          ensure(g).offerings += (o.amount as number) || 0;
+        });
+      }
+
+      const columns: ReportColumn[] = [
+        { key: "group", label: "Cell Group" },
+        { key: "members", label: "Members" },
+        { key: "attendance", label: "Attendance %" },
+      ];
+      types.forEach((t) => columns.push({ key: t.id, label: `${t.name} done` }));
+      if (canOfferings) columns.push({ key: "offerings", label: "Approved Offerings (R)" });
+
+      const rows: ReportRow[] = Object.entries(groups)
+        .map(([group, v]) => {
+          const row: ReportRow = {
+            group,
+            members: v.members,
+            attendance: v.marked > 0 ? `${Math.round((v.present / v.marked) * 100)}%` : "—",
+          };
+          types.forEach((t) => (row[t.id] = v.completed[t.id] || 0));
+          if (canOfferings) row.offerings = Number(v.offerings.toFixed(2));
+          return row;
+        })
+        .sort((a, b) => String(a.group).localeCompare(String(b.group)));
+
+      return {
+        columns,
+        rows,
+        summary: [
+          { label: "Cell groups", value: String(rows.length) },
+          { label: "Members", value: String(members.length) },
+        ],
+      };
+    },
+  },
+
+  {
+    id: "giving_by_member",
+    title: "Giving by Member",
+    description: "Income attributed to each member over a period. Sensitive donor data.",
+    group: "Finance",
+    roles: ["owner", "admin", "finance"],
+    dateRange: true,
+    scope: "none",
+    run: async (ctx) => {
+      const snap = await getDocs(query(collection(db, "transactions"), where("tenantId", "==", ctx.tenantId)));
+      const income = snap.docs
+        .map((d) => d.data() as Record<string, unknown>)
+        .filter((t) => (t.type as string) !== "expense" && inRange((t.date as string) || "", ctx.from, ctx.to));
+      const byMember: Record<string, { name: string; total: number; count: number }> = {};
+      let unattributed = 0;
+      income.forEach((t) => {
+        const id = t.memberId as string;
+        if (!id) {
+          unattributed += (t.amount as number) || 0;
+          return;
+        }
+        const b = (byMember[id] ||= { name: (t.memberName as string) || "(member)", total: 0, count: 0 });
+        b.total += (t.amount as number) || 0;
+        b.count += 1;
+      });
+      const rows: ReportRow[] = Object.values(byMember)
+        .map((v) => ({ name: v.name, total: Number(v.total.toFixed(2)), gifts: v.count }))
+        .sort((a, b) => Number(b.total) - Number(a.total));
+      const attributed = rows.reduce((s, r) => s + Number(r.total), 0);
+      return {
+        columns: [
+          { key: "name", label: "Member" },
+          { key: "total", label: "Total Given (R)" },
+          { key: "gifts", label: "Gifts" },
+        ],
+        rows,
+        summary: [
+          { label: "Givers", value: String(rows.length) },
+          { label: "Attributed", value: money(attributed) },
+          { label: "Unattributed", value: money(unattributed) },
         ],
       };
     },
