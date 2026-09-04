@@ -76,6 +76,11 @@ service cloud.firestore {
           || hasRole('follow_up') || hasRole('branch_admin')
           || userData().get('visitorMinistry', false) == true;
     }
+    // True when the caller is a cell leader whose assigned region matches the one
+    // passed in. Used to scope SOP checklist runs to a leader's own group.
+    function ownsChecklistRegion(region) {
+      return hasRole('cell_leader') && region == userData().assignedCellRegion;
+    }
     function sameTenant(resource) {
       return resource.data.tenantId == userTenantId();
     }
@@ -529,8 +534,10 @@ service cloud.firestore {
     // WORKFLOWS (templates)
     // ============================================
     match /workflows/{id} {
+      // Cell leaders may READ workflow definitions so they can run SOP checklists
+      // scoped to their group. They still cannot create or edit workflows.
       allow read: if isSignedIn() && (isSuperAdmin() || (tenantAllowed(resource)
-                  && (hasRole('owner') || hasRole('admin') || hasRole('member_manager') || canDoFollowUp())));
+                  && (hasRole('owner') || hasRole('admin') || hasRole('member_manager') || hasRole('cell_leader') || canDoFollowUp())));
       allow create: if isSignedIn() && tenantAllowedWrite(request.resource.data)
                     && (hasRole('owner') || hasRole('admin') || hasRole('member_manager'))
                     && callerIsPaid();
@@ -543,8 +550,9 @@ service cloud.firestore {
                     && (hasRole('owner') || hasRole('admin'))));
     }
     match /workflow_steps/{id} {
+      // Cell leaders may READ steps to snapshot them into an SOP checklist run.
       allow read: if isSignedIn() && (isSuperAdmin() || (tenantAllowed(resource)
-                  && (hasRole('owner') || hasRole('admin') || hasRole('member_manager'))));
+                  && (hasRole('owner') || hasRole('admin') || hasRole('member_manager') || hasRole('cell_leader'))));
       // create/update: check new data; delete: check existing resource (request.resource.data is null on delete)
       allow create, update: if isSignedIn() && tenantAllowedWrite(request.resource.data)
                              && (hasRole('owner') || hasRole('admin') || hasRole('member_manager'))
@@ -577,6 +585,32 @@ service cloud.firestore {
       allow update: if isSignedIn() && tenantAllowed(resource)
                     && (hasRole('owner') || hasRole('admin') || hasRole('member_manager')
                     || resource.data.assignedToUid == request.auth.uid);
+      allow delete: if isSignedIn()
+                    && (isSuperAdmin() || (tenantAllowed(resource)
+                    && (hasRole('owner') || hasRole('admin'))));
+    }
+
+    // ============================================
+    // SOP CHECKLIST RUNS
+    // A "run" is one execution of a checklist-mode workflow (a dateless,
+    // recurring SOP) for a single cell group. Items are embedded on the run doc
+    // and ticked off in place. Cell leaders may read/create/update only runs for
+    // their own assigned cell region; managers and admins see every group's runs.
+    // ============================================
+    match /checklist_runs/{id} {
+      allow read: if isSignedIn() && (isSuperAdmin() || (tenantAllowed(resource)
+                  && (hasRole('owner') || hasRole('admin') || hasRole('member_manager')
+                  || ownsChecklistRegion(resource.data.cellRegion))));
+      allow create: if isSignedIn() && tenantAllowedWrite(request.resource.data)
+                    && (hasRole('owner') || hasRole('admin') || hasRole('member_manager')
+                    || ownsChecklistRegion(request.resource.data.cellRegion))
+                    && callerIsPaid();
+      allow update: if isSignedIn() && tenantAllowed(resource)
+                    && request.resource.data.tenantId == resource.data.tenantId
+                    && request.resource.data.cellRegion == resource.data.cellRegion
+                    && (hasRole('owner') || hasRole('admin') || hasRole('member_manager')
+                    || ownsChecklistRegion(resource.data.cellRegion))
+                    && callerIsPaid();
       allow delete: if isSignedIn()
                     && (isSuperAdmin() || (tenantAllowed(resource)
                     && (hasRole('owner') || hasRole('admin'))));

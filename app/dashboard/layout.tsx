@@ -92,7 +92,7 @@ export default async function DashboardLayout({
     { name: "Announcements", href: "/dashboard/announcements", icon: "📢", roles: ["owner", "admin", "member_manager"] },
     { name: "Volunteers", href: "/dashboard/volunteers", icon: "🙌", roles: ["owner", "admin", "member_manager", "cell_leader"] },
     { name: "Worship Planning", href: "/dashboard/worship", icon: "🎵", roles: ["owner", "admin", "member_manager"] },
-    { name: "Workflows", href: "/dashboard/workflows", icon: "⚡", roles: ["owner", "admin", "member_manager"] },
+    { name: "Workflows", href: "/dashboard/workflows", icon: "⚡", roles: ["owner", "admin", "member_manager", "cell_leader"] },
     { name: "Team Members", href: "/dashboard/team", icon: "🧑‍🤝‍🧑", roles: ["owner"] },
     { name: "Church Settings", href: "/dashboard/church-settings", icon: "⚙️", roles: ["owner", "admin"] },
     { name: "Branding", href: "/dashboard/branding", icon: "🎨", roles: ["owner", "admin"] },
@@ -171,7 +171,7 @@ export default async function DashboardLayout({
                         🔒 Paid
                       </span>
                     )}
-                    {!locked && item.name === "Workflows" && (
+                    {!locked && item.name === "Workflows" && ["owner", "admin", "member_manager"].includes(userRole) && (
                       <OverdueBadge tenantId={tenantId} />
                     )}
                     {!locked && item.name === "Membership Management" && (
