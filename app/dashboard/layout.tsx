@@ -86,6 +86,7 @@ export default async function DashboardLayout({
     { name: "Financials", href: "/dashboard/finance", icon: "💰", roles: ["owner", "admin", "finance", "branch_admin"] },
     { name: "Cell Offering", href: "/dashboard/cell-offering", icon: "💵", roles: ["cell_leader"] },
     { name: "Pastoral Care", href: "/dashboard/pastoral", icon: "🫶", roles: ["owner", "admin", "cell_leader"] },
+    { name: "My Care Follow-ups", href: "/dashboard/my-care", icon: "🤝", roles: ["owner", "admin", "member_manager", "member_viewer", "finance", "finance_viewer", "viewer", "follow_up", "cell_leader", "branch_admin"] },
     { name: "Communications", href: "/dashboard/communications", icon: "💬", roles: ["owner", "admin", "member_manager"] },
     { name: "Daily Summary", href: "/dashboard/daily-summary", icon: "🔔", roles: ["owner", "admin"] },
     { name: "Forms", href: "/dashboard/forms", icon: "📋", roles: ["owner", "admin", "member_manager"] },

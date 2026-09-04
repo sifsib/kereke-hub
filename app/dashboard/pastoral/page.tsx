@@ -15,6 +15,8 @@ import {
   query, where, orderBy, doc, serverTimestamp,
 } from 'firebase/firestore';
 import { CARE_TYPES, type CareType, getCareInfo } from '../../../lib/careTypes';
+import { useTeamMembers } from '../../../lib/useTeamMembers';
+import { notifyAssignee } from '../../../lib/visitorMinistry';
 import CellPastoralNote from './CellPastoralNote';
 
 // --- Types ---
@@ -26,9 +28,12 @@ type CareLog = {
   type: CareType;
   date: string;
   notes: string;
-  assignedTo: string;
+  assignedTo: string;           // who logged it (or the cell leader who submitted it)
   status: 'open' | 'closed';
   createdAt: unknown;
+  source?: string;              // 'cell_group' when submitted by a cell leader
+  careAssigneeUid?: string;     // team member responsible for following up
+  careAssigneeName?: string;
 };
 
 type Member = { id: string; name: string };
@@ -59,7 +64,9 @@ export default function PastoralCarePage() {
 
 function PastoralCareQueue() {
   const { appUser, loading: userLoading } = useAppUser();
+  const { team } = useTeamMembers(appUser?.tenantId);
   const [tab, setTab] = useState<PageTab>('active');
+  const [assigningId, setAssigningId] = useState<string | null>(null);
 
   // Member picker state
   const [members, setMembers] = useState<Member[]>([]);
@@ -202,6 +209,29 @@ function PastoralCareQueue() {
     }
   };
 
+  // Allocate a care item to a team member so they can follow up. Emails the
+  // person (best effort) so they know it is now theirs.
+  const assignCare = async (log: CareLog, uid: string) => {
+    const name = team.find(t => t.uid === uid)?.name || '';
+    setAssigningId(log.id);
+    try {
+      await updateDoc(doc(db, 'care_logs', log.id), {
+        careAssigneeUid: uid,
+        careAssigneeName: name,
+        careAssignedAt: serverTimestamp(),
+      });
+      setLogs(prev => prev.map(l => (l.id === log.id ? { ...l, careAssigneeUid: uid, careAssigneeName: name } : l)));
+      if (uid) {
+        notifyAssignee({ assigneeUid: uid, subjectName: log.memberName, kind: 'care', note: log.notes });
+      }
+    } catch (err) {
+      console.error('Could not assign care item:', err);
+      alert('Could not assign this care item. Please try again.');
+    } finally {
+      setAssigningId(null);
+    }
+  };
+
   // Derived
   const activeLogs = logs.filter(l => l.status === 'open');
   const historyLogs = logs.filter(l => {
@@ -289,6 +319,11 @@ function PastoralCareQueue() {
                           <span className="text-xs font-semibold bg-gray-100 text-gray-600 px-2 py-0.5 rounded-full">
                             {info.label}
                           </span>
+                          {log.source === 'cell_group' && (
+                            <span className="text-xs font-semibold bg-teal-50 text-teal-700 border border-teal-200 px-2 py-0.5 rounded-full">
+                              Cell group
+                            </span>
+                          )}
                         </div>
                         <p className="text-xs text-gray-400 mb-2">
                           {log.date} · Logged by {log.assignedTo}
@@ -301,6 +336,29 @@ function PastoralCareQueue() {
                       >
                         Mark Resolved
                       </button>
+                    </div>
+
+                    {/* Allocate to a care team member for follow-up */}
+                    <div className="flex flex-wrap items-center gap-2 mt-3 pt-3 border-t border-gray-100">
+                      <span className="text-xs font-bold text-gray-400 uppercase tracking-wider">Follow-up by</span>
+                      <select
+                        value={log.careAssigneeUid || ''}
+                        onChange={(e) => assignCare(log, e.target.value)}
+                        disabled={assigningId === log.id}
+                        className="text-xs border border-gray-200 rounded-lg px-2 py-1 bg-white text-gray-700 focus:outline-none focus:ring-2 focus:ring-emerald-500 disabled:opacity-50"
+                      >
+                        <option value="">Unassigned</option>
+                        {team.map((t) => (
+                          <option key={t.uid} value={t.uid}>
+                            {t.name}{t.isSelf ? ' (You)' : ''}
+                          </option>
+                        ))}
+                      </select>
+                      {log.careAssigneeName ? (
+                        <span className="text-xs text-emerald-700">Assigned to {log.careAssigneeName}</span>
+                      ) : (
+                        <span className="text-xs text-amber-600">Not yet allocated</span>
+                      )}
                     </div>
                   </div>
                 );
@@ -481,7 +539,10 @@ function PastoralCareQueue() {
                             {log.status === 'closed' ? 'Resolved' : 'Open'}
                           </span>
                         </div>
-                        <p className="text-xs text-gray-400 mt-0.5">{log.date} · {log.assignedTo}</p>
+                        <p className="text-xs text-gray-400 mt-0.5">
+                          {log.date} · {log.assignedTo}
+                          {log.careAssigneeName ? ` · follow-up: ${log.careAssigneeName}` : ''}
+                        </p>
                         <p className="text-sm text-gray-600 mt-1 line-clamp-2">{log.notes}</p>
                       </div>
                       <button

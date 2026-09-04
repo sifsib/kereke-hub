@@ -8,7 +8,7 @@
 //   assigneeUid: string,        // who to notify
 //   subjectName: string,        // the visitor/member's name
 //   subjectPhone?: string,      // their contact number (shown in the email)
-//   kind?: "visitor" | "member" | "workflow",
+//   kind?: "visitor" | "member" | "workflow" | "care",
 //   reason?: string,            // e.g. the visitor's reason for visiting
 //   note?: string               // any capture note
 // }
@@ -68,7 +68,14 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ skipped: true, reason: "Brevo not connected" }, { status: 200 });
   }
 
-  const who = kind === "member" ? "a new member" : kind === "workflow" ? "a follow-up" : "a visitor";
+  const who =
+    kind === "member"
+      ? "a new member"
+      : kind === "workflow"
+      ? "a follow-up"
+      : kind === "care"
+      ? "a pastoral care follow-up"
+      : "a visitor";
   const subject = `You have been assigned ${who}: ${subjectName || ""}`.trim();
 
   const rows: string[] = [];

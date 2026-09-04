@@ -1020,11 +1020,18 @@ service cloud.firestore {
     // PASTORAL CARE LOGS (sensitive - owner and admin READ/manage only)
     // Cell leaders may CREATE a note for their group (tagged source
     // 'cell_group'), but never read or manage the queue.
+    // A care item can be ASSIGNED to a team member for follow-up: that assignee
+    // may read and work ONLY their own assigned items (marking them resolved and
+    // adding a follow-up note), never the rest of the queue.
     // ============================================
     match /care_logs/{id} {
       allow read: if isSignedIn()
                   && tenantAllowed(resource)
                   && (isSuperAdmin() || hasRole('owner') || hasRole('admin'));
+      // Assignee may read only the item(s) assigned to them.
+      allow read: if isSignedIn()
+                  && tenantAllowed(resource)
+                  && resource.data.careAssigneeUid == request.auth.uid;
       allow create: if isSignedIn()
                     && tenantAllowedWrite(request.resource.data)
                     && (isSuperAdmin() || hasRole('owner') || hasRole('admin')
@@ -1033,6 +1040,16 @@ service cloud.firestore {
                     && tenantAllowed(resource)
                     && request.resource.data.tenantId == resource.data.tenantId
                     && (isSuperAdmin() || hasRole('owner') || hasRole('admin'));
+      // Assignee may update ONLY their own item, and only the follow-up fields
+      // (status, resolved timestamp, and their follow-up note). They cannot
+      // reassign it, change the member, or edit the original note.
+      allow update: if isSignedIn()
+                    && tenantAllowed(resource)
+                    && resource.data.careAssigneeUid == request.auth.uid
+                    && request.resource.data.careAssigneeUid == resource.data.careAssigneeUid
+                    && request.resource.data.tenantId == resource.data.tenantId
+                    && request.resource.data.diff(resource.data).affectedKeys()
+                         .hasOnly(['status', 'resolvedAt', 'assigneeNote', 'assigneeNoteAt']);
       allow delete: if isSignedIn()
                     && tenantAllowed(resource)
                     && (isSuperAdmin() || hasRole('owner') || hasRole('admin'));
