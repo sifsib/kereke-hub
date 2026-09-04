@@ -77,8 +77,9 @@ service cloud.firestore {
           || userData().get('visitorMinistry', false) == true;
     }
     // True when the caller is a cell leader whose assigned region matches the one
-    // passed in. Used to scope SOP checklist runs to a leader's own group.
-    function ownsChecklistRegion(region) {
+    // passed in. Used to scope cell-group data (SOP checklist runs, offerings) to
+    // a leader's own group.
+    function ownsCellRegion(region) {
       return hasRole('cell_leader') && region == userData().assignedCellRegion;
     }
     function sameTenant(resource) {
@@ -460,6 +461,28 @@ service cloud.firestore {
     }
 
     // ============================================
+    // CELL GROUP OFFERINGS
+    // A cell leader submits a single total + date for their group into a pending
+    // queue; finance reviews and approves, and approving creates a real
+    // transaction. Cell leaders may create and read only their own region's
+    // submissions; finance roles review every group's. Only finance may
+    // approve or reject (update). Records are created as "pending".
+    // ============================================
+    match /cell_offerings/{id} {
+      allow read: if isSignedIn() && (isSuperAdmin() || (sameTenant(resource)
+                  && (canReadFinance() || ownsCellRegion(resource.data.cellRegion))));
+      allow create: if isSignedIn() && settingOwnTenant(request.resource.data)
+                    && request.resource.data.status == 'pending'
+                    && (canManageFinance() || ownsCellRegion(request.resource.data.cellRegion));
+      allow update: if isSignedIn() && sameTenant(resource)
+                    && request.resource.data.tenantId == resource.data.tenantId
+                    && canManageFinance();
+      allow delete: if isSignedIn()
+                    && (isSuperAdmin() || (sameTenant(resource)
+                    && (hasRole('owner') || hasRole('admin'))));
+    }
+
+    // ============================================
     // FINANCE CATEGORIES (configurable per tenant)
     // Finance roles: read
     // Owner/Admin: full CRUD
@@ -600,16 +623,16 @@ service cloud.firestore {
     match /checklist_runs/{id} {
       allow read: if isSignedIn() && (isSuperAdmin() || (tenantAllowed(resource)
                   && (hasRole('owner') || hasRole('admin') || hasRole('member_manager')
-                  || ownsChecklistRegion(resource.data.cellRegion))));
+                  || ownsCellRegion(resource.data.cellRegion))));
       allow create: if isSignedIn() && tenantAllowedWrite(request.resource.data)
                     && (hasRole('owner') || hasRole('admin') || hasRole('member_manager')
-                    || ownsChecklistRegion(request.resource.data.cellRegion))
+                    || ownsCellRegion(request.resource.data.cellRegion))
                     && callerIsPaid();
       allow update: if isSignedIn() && tenantAllowed(resource)
                     && request.resource.data.tenantId == resource.data.tenantId
                     && request.resource.data.cellRegion == resource.data.cellRegion
                     && (hasRole('owner') || hasRole('admin') || hasRole('member_manager')
-                    || ownsChecklistRegion(resource.data.cellRegion))
+                    || ownsCellRegion(resource.data.cellRegion))
                     && callerIsPaid();
       allow delete: if isSignedIn()
                     && (isSuperAdmin() || (tenantAllowed(resource)
