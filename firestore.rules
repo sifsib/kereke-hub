@@ -76,6 +76,12 @@ service cloud.firestore {
           || hasRole('follow_up') || hasRole('branch_admin')
           || userData().get('visitorMinistry', false) == true;
     }
+    // True when the caller is a cell leader whose assigned region matches the one
+    // passed in. Used to scope cell-group data (SOP checklist runs, offerings) to
+    // a leader's own group.
+    function ownsCellRegion(region) {
+      return hasRole('cell_leader') && region == userData().assignedCellRegion;
+    }
     function sameTenant(resource) {
       return resource.data.tenantId == userTenantId();
     }
@@ -455,6 +461,28 @@ service cloud.firestore {
     }
 
     // ============================================
+    // CELL GROUP OFFERINGS
+    // A cell leader submits a single total + date for their group into a pending
+    // queue; finance reviews and approves, and approving creates a real
+    // transaction. Cell leaders may create and read only their own region's
+    // submissions; finance roles review every group's. Only finance may
+    // approve or reject (update). Records are created as "pending".
+    // ============================================
+    match /cell_offerings/{id} {
+      allow read: if isSignedIn() && (isSuperAdmin() || (sameTenant(resource)
+                  && (canReadFinance() || ownsCellRegion(resource.data.cellRegion))));
+      allow create: if isSignedIn() && settingOwnTenant(request.resource.data)
+                    && request.resource.data.status == 'pending'
+                    && (canManageFinance() || ownsCellRegion(request.resource.data.cellRegion));
+      allow update: if isSignedIn() && sameTenant(resource)
+                    && request.resource.data.tenantId == resource.data.tenantId
+                    && canManageFinance();
+      allow delete: if isSignedIn()
+                    && (isSuperAdmin() || (sameTenant(resource)
+                    && (hasRole('owner') || hasRole('admin'))));
+    }
+
+    // ============================================
     // FINANCE CATEGORIES (configurable per tenant)
     // Finance roles: read
     // Owner/Admin: full CRUD
@@ -529,8 +557,10 @@ service cloud.firestore {
     // WORKFLOWS (templates)
     // ============================================
     match /workflows/{id} {
+      // Cell leaders may READ workflow definitions so they can run SOP checklists
+      // scoped to their group. They still cannot create or edit workflows.
       allow read: if isSignedIn() && (isSuperAdmin() || (tenantAllowed(resource)
-                  && (hasRole('owner') || hasRole('admin') || hasRole('member_manager') || canDoFollowUp())));
+                  && (hasRole('owner') || hasRole('admin') || hasRole('member_manager') || hasRole('cell_leader') || canDoFollowUp())));
       allow create: if isSignedIn() && tenantAllowedWrite(request.resource.data)
                     && (hasRole('owner') || hasRole('admin') || hasRole('member_manager'))
                     && callerIsPaid();
@@ -543,8 +573,9 @@ service cloud.firestore {
                     && (hasRole('owner') || hasRole('admin'))));
     }
     match /workflow_steps/{id} {
+      // Cell leaders may READ steps to snapshot them into an SOP checklist run.
       allow read: if isSignedIn() && (isSuperAdmin() || (tenantAllowed(resource)
-                  && (hasRole('owner') || hasRole('admin') || hasRole('member_manager'))));
+                  && (hasRole('owner') || hasRole('admin') || hasRole('member_manager') || hasRole('cell_leader'))));
       // create/update: check new data; delete: check existing resource (request.resource.data is null on delete)
       allow create, update: if isSignedIn() && tenantAllowedWrite(request.resource.data)
                              && (hasRole('owner') || hasRole('admin') || hasRole('member_manager'))
@@ -577,6 +608,32 @@ service cloud.firestore {
       allow update: if isSignedIn() && tenantAllowed(resource)
                     && (hasRole('owner') || hasRole('admin') || hasRole('member_manager')
                     || resource.data.assignedToUid == request.auth.uid);
+      allow delete: if isSignedIn()
+                    && (isSuperAdmin() || (tenantAllowed(resource)
+                    && (hasRole('owner') || hasRole('admin'))));
+    }
+
+    // ============================================
+    // SOP CHECKLIST RUNS
+    // A "run" is one execution of a checklist-mode workflow (a dateless,
+    // recurring SOP) for a single cell group. Items are embedded on the run doc
+    // and ticked off in place. Cell leaders may read/create/update only runs for
+    // their own assigned cell region; managers and admins see every group's runs.
+    // ============================================
+    match /checklist_runs/{id} {
+      allow read: if isSignedIn() && (isSuperAdmin() || (tenantAllowed(resource)
+                  && (hasRole('owner') || hasRole('admin') || hasRole('member_manager')
+                  || ownsCellRegion(resource.data.cellRegion))));
+      allow create: if isSignedIn() && tenantAllowedWrite(request.resource.data)
+                    && (hasRole('owner') || hasRole('admin') || hasRole('member_manager')
+                    || ownsCellRegion(request.resource.data.cellRegion))
+                    && callerIsPaid();
+      allow update: if isSignedIn() && tenantAllowed(resource)
+                    && request.resource.data.tenantId == resource.data.tenantId
+                    && request.resource.data.cellRegion == resource.data.cellRegion
+                    && (hasRole('owner') || hasRole('admin') || hasRole('member_manager')
+                    || ownsCellRegion(resource.data.cellRegion))
+                    && callerIsPaid();
       allow delete: if isSignedIn()
                     && (isSuperAdmin() || (tenantAllowed(resource)
                     && (hasRole('owner') || hasRole('admin'))));
@@ -960,7 +1017,9 @@ service cloud.firestore {
     }
 
     // ============================================
-    // PASTORAL CARE LOGS (sensitive - owner and admin only)
+    // PASTORAL CARE LOGS (sensitive - owner and admin READ/manage only)
+    // Cell leaders may CREATE a note for their group (tagged source
+    // 'cell_group'), but never read or manage the queue.
     // ============================================
     match /care_logs/{id} {
       allow read: if isSignedIn()
@@ -968,7 +1027,8 @@ service cloud.firestore {
                   && (isSuperAdmin() || hasRole('owner') || hasRole('admin'));
       allow create: if isSignedIn()
                     && tenantAllowedWrite(request.resource.data)
-                    && (isSuperAdmin() || hasRole('owner') || hasRole('admin'));
+                    && (isSuperAdmin() || hasRole('owner') || hasRole('admin')
+                    || (hasRole('cell_leader') && request.resource.data.source == 'cell_group'));
       allow update: if isSignedIn()
                     && tenantAllowed(resource)
                     && request.resource.data.tenantId == resource.data.tenantId

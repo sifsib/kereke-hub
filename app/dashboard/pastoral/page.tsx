@@ -14,27 +14,10 @@ import {
   collection, addDoc, updateDoc, getDocs,
   query, where, orderBy, doc, serverTimestamp,
 } from 'firebase/firestore';
+import { CARE_TYPES, type CareType, getCareInfo } from '../../../lib/careTypes';
+import CellPastoralNote from './CellPastoralNote';
 
 // --- Types ---
-
-type CareType =
-  | 'hospital_visit'
-  | 'home_visit'
-  | 'phone_call'
-  | 'counseling'
-  | 'prayer'
-  | 'bereavement'
-  | 'other';
-
-const CARE_TYPES: { value: CareType; label: string; icon: string }[] = [
-  { value: 'hospital_visit', label: 'Hospital Visit', icon: '🏥' },
-  { value: 'home_visit',     label: 'Home Visit',     icon: '🏠' },
-  { value: 'phone_call',     label: 'Phone Call',     icon: '📞' },
-  { value: 'counseling',     label: 'Counseling Session', icon: '💬' },
-  { value: 'prayer',         label: 'Prayer Meeting', icon: '🙏' },
-  { value: 'bereavement',    label: 'Bereavement Visit', icon: '🕊️' },
-  { value: 'other',          label: 'Other',          icon: '📝' },
-];
 
 type CareLog = {
   id: string;
@@ -55,12 +38,26 @@ type PageTab = 'active' | 'log' | 'history';
 
 const todayStr = () => new Date().toISOString().split('T')[0];
 
-const getCareInfo = (type: CareType) =>
-  CARE_TYPES.find(t => t.value === type) ?? CARE_TYPES[CARE_TYPES.length - 1];
-
 // --- Page ---
 
+// Cell leaders reach the same Pastoral Care nav item but only get the submit
+// form, never the queue (they cannot read care_logs). Everyone else gets the
+// full queue below.
 export default function PastoralCarePage() {
+  const { appUser, loading: userLoading } = useAppUser();
+  if (userLoading) {
+    return (
+      <div className="p-10 flex items-center gap-2">
+        <div className="w-5 h-5 border-2 border-emerald-600 border-t-transparent rounded-full animate-spin" />
+        <p className="text-gray-600">Loading...</p>
+      </div>
+    );
+  }
+  if (appUser?.role === 'cell_leader') return <CellPastoralNote />;
+  return <PastoralCareQueue />;
+}
+
+function PastoralCareQueue() {
   const { appUser, loading: userLoading } = useAppUser();
   const [tab, setTab] = useState<PageTab>('active');
 

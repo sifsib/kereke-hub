@@ -101,7 +101,25 @@ type GivingRecord = {
   createdAt: string;
 };
 
-type Tab = 'overview' | 'add' | 'ledger' | 'export' | 'online';
+// A cell leader's offering submission, reviewed here before it hits the ledger.
+type CellOffering = {
+  id: string;
+  cellRegion: string;
+  amount: number;
+  date: string;
+  note?: string;
+  status: 'pending' | 'approved' | 'rejected';
+  submittedByName?: string;
+  submittedAt?: unknown;
+  reviewedByName?: string;
+  transactionId?: string;
+};
+
+// The income category approved cell offerings land under, so finance never has
+// to re-enter them and Overview/Ledger/Export pick them up automatically.
+const CELL_OFFERING_CATEGORY = 'Cell Group Offerings';
+
+type Tab = 'overview' | 'add' | 'ledger' | 'export' | 'online' | 'celloffer';
 type PeriodType = 'month' | 'mtd' | 'quarter' | 'qtd' | 'year' | 'ytd';
 
 // --- Helpers ---
@@ -147,6 +165,11 @@ export default function FinancePage() {
   const [givingLoading, setGivingLoading] = useState(false);
   const [givingStatusFilter, setGivingStatusFilter] = useState<string>('all');
   const [givingSearch, setGivingSearch] = useState('');
+
+  // Cell group offerings state
+  const [cellOfferings, setCellOfferings] = useState<CellOffering[]>([]);
+  const [cellOfferLoading, setCellOfferLoading] = useState(false);
+  const [processingOffer, setProcessingOffer] = useState<string | null>(null);
 
   // form
   const [txType, setTxType] = useState<'income' | 'expense'>('income');
@@ -323,6 +346,81 @@ export default function FinancePage() {
     }
   };
 
+  // --- Cell group offerings (pending review queue) ---
+
+  const fetchCellOfferings = async (tenantId: string) => {
+    setCellOfferLoading(true);
+    try {
+      // No orderBy to avoid a composite index; sort client-side by submittedAt.
+      const snap = await getDocs(
+        query(collection(db, 'cell_offerings'), where('tenantId', '==', tenantId)),
+      );
+      const list = snap.docs.map((d) => ({ id: d.id, ...(d.data() as Omit<CellOffering, 'id'>) }));
+      list.sort((a, b) => {
+        const ta = (a.submittedAt as { toMillis?: () => number } | undefined)?.toMillis?.() ?? 0;
+        const tb = (b.submittedAt as { toMillis?: () => number } | undefined)?.toMillis?.() ?? 0;
+        return tb - ta;
+      });
+      setCellOfferings(list);
+    } catch (err) {
+      console.error('Failed to load cell offerings:', err);
+    } finally {
+      setCellOfferLoading(false);
+    }
+  };
+
+  // Approving a cell offering writes the real ledger entry AND stamps the
+  // submission approved with a link to that transaction, so it can never be
+  // approved (and posted) twice.
+  const approveOffering = async (o: CellOffering) => {
+    if (!appUser || o.status !== 'pending') return;
+    setProcessingOffer(o.id);
+    try {
+      const txRef = await addDoc(collection(db, 'transactions'), {
+        tenantId: appUser.tenantId,
+        type: 'income',
+        date: o.date,
+        description: `Cell Group Offering — ${o.cellRegion}`,
+        amount: o.amount,
+        category: CELL_OFFERING_CATEGORY,
+        cellRegion: o.cellRegion,
+        createdAt: serverTimestamp(),
+      });
+      await updateDoc(doc(db, 'cell_offerings', o.id), {
+        status: 'approved',
+        reviewedByName: appUser.displayName || appUser.email || 'Finance',
+        reviewedAt: serverTimestamp(),
+        transactionId: txRef.id,
+      });
+      await fetchCellOfferings(appUser.tenantId);
+      await fetchTransactions(appUser.tenantId);
+    } catch (err) {
+      console.error(err);
+      alert('Could not approve the offering. Please try again.');
+    } finally {
+      setProcessingOffer(null);
+    }
+  };
+
+  const rejectOffering = async (o: CellOffering) => {
+    if (!appUser || o.status !== 'pending') return;
+    if (!confirm('Reject this cell group offering? It will not be added to the ledger.')) return;
+    setProcessingOffer(o.id);
+    try {
+      await updateDoc(doc(db, 'cell_offerings', o.id), {
+        status: 'rejected',
+        reviewedByName: appUser.displayName || appUser.email || 'Finance',
+        reviewedAt: serverTimestamp(),
+      });
+      await fetchCellOfferings(appUser.tenantId);
+    } catch (err) {
+      console.error(err);
+      alert('Could not update the offering. Please try again.');
+    } finally {
+      setProcessingOffer(null);
+    }
+  };
+
   // Load custom categories from Firestore
   const fetchCustomCategories = async (tenantId: string) => {
     setRefreshing(true);
@@ -395,6 +493,14 @@ export default function FinancePage() {
   useEffect(() => {
     if (tab === 'online' && appUser && givingRecords.length === 0 && !givingLoading) {
       fetchGivingRecords(appUser.tenantId);
+    }
+  }, [tab, appUser]);
+
+  // Reload cell offerings each time the Cell Offerings tab is opened, so a
+  // freshly submitted or just-approved item shows its current status.
+  useEffect(() => {
+    if (tab === 'celloffer' && appUser) {
+      fetchCellOfferings(appUser.tenantId);
     }
   }, [tab, appUser]);
 
@@ -695,12 +801,18 @@ export default function FinancePage() {
 
   // --- Render ---
 
+  const pendingOfferCount = cellOfferings.filter((o) => o.status === 'pending').length;
+  // Only finance-manager roles may approve/reject; branch admins can view finance
+  // but not post to the ledger.
+  const canManageFinance = ['owner', 'admin', 'finance'].includes(appUser?.role || '');
+
   const tabs: { key: Tab; label: string }[] = [
     { key: 'overview', label: 'Overview' },
     { key: 'add', label: 'Record' },
     { key: 'ledger', label: 'Ledger' },
     { key: 'export', label: 'Export' },
     { key: 'online', label: 'Online Giving' },
+    { key: 'celloffer', label: pendingOfferCount > 0 ? `Cell Offerings (${pendingOfferCount})` : 'Cell Offerings' },
   ];
 
   const givingStatusBadge = (status: string) => {
@@ -1319,6 +1431,99 @@ export default function FinancePage() {
                         <td className="px-5 py-3.5">{givingStatusBadge(r.status)}</td>
                         <td className="px-5 py-3.5 text-gray-400 text-xs font-mono">{r.reference || '-'}</td>
                         <td className="px-5 py-3.5 text-gray-500 text-xs">{formatDate(r.createdAt)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ── Cell Group Offerings ── */}
+      {tab === 'celloffer' && (
+        <div className="space-y-6">
+          <div className="bg-white border border-gray-200 rounded-xl p-5">
+            <h2 className="text-sm font-bold text-gray-900">Cell group offerings</h2>
+            <p className="text-xs text-gray-500 mt-1">
+              Totals submitted by cell leaders. Approving one records it in the ledger under &ldquo;{CELL_OFFERING_CATEGORY}&rdquo;, so you never re-type it. Rejecting leaves it out.
+            </p>
+          </div>
+
+          <div className="bg-white border border-gray-200 rounded-xl overflow-hidden">
+            {cellOfferLoading ? (
+              <div className="p-8 flex items-center justify-center gap-2 text-gray-400">
+                <div className="w-4 h-4 border-2 border-emerald-500 border-t-transparent rounded-full animate-spin" />
+                <span className="text-sm">Loading offerings...</span>
+              </div>
+            ) : cellOfferings.length === 0 ? (
+              <div className="p-10 text-center">
+                <p className="text-sm text-gray-400">
+                  No cell group offerings submitted yet. Cell leaders submit these from the Cell Offering page.
+                </p>
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="bg-gray-50 border-b border-gray-200">
+                      <th className="text-left px-5 py-3 text-xs font-bold text-gray-500 uppercase tracking-wider">Cell Group</th>
+                      <th className="text-right px-5 py-3 text-xs font-bold text-gray-500 uppercase tracking-wider">Amount</th>
+                      <th className="text-left px-5 py-3 text-xs font-bold text-gray-500 uppercase tracking-wider">Date</th>
+                      <th className="text-left px-5 py-3 text-xs font-bold text-gray-500 uppercase tracking-wider">Submitted By</th>
+                      <th className="text-left px-5 py-3 text-xs font-bold text-gray-500 uppercase tracking-wider">Status</th>
+                      <th className="text-right px-5 py-3 text-xs font-bold text-gray-500 uppercase tracking-wider">Action</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-100">
+                    {cellOfferings.map((o) => (
+                      <tr key={o.id} className="hover:bg-gray-50 transition-colors align-top">
+                        <td className="px-5 py-3.5 font-semibold text-gray-900">{o.cellRegion || '-'}</td>
+                        <td className="px-5 py-3.5 text-right font-bold text-gray-900">{fmt(o.amount)}</td>
+                        <td className="px-5 py-3.5 text-gray-500 text-xs">{formatDate(o.date)}</td>
+                        <td className="px-5 py-3.5">
+                          <div className="text-gray-700">{o.submittedByName || '-'}</div>
+                          {o.note && <div className="text-xs text-gray-400 mt-0.5">{o.note}</div>}
+                        </td>
+                        <td className="px-5 py-3.5">
+                          <span
+                            className={`inline-flex px-2 py-0.5 rounded-full text-xs font-bold uppercase tracking-wide border ${
+                              o.status === 'approved'
+                                ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                                : o.status === 'rejected'
+                                ? 'bg-red-50 text-red-700 border-red-200'
+                                : 'bg-amber-50 text-amber-700 border-amber-200'
+                            }`}
+                          >
+                            {o.status === 'pending' ? 'Pending' : o.status === 'approved' ? 'Approved' : 'Rejected'}
+                          </span>
+                          {o.status !== 'pending' && o.reviewedByName && (
+                            <div className="text-xs text-gray-400 mt-0.5">by {o.reviewedByName}</div>
+                          )}
+                        </td>
+                        <td className="px-5 py-3.5 text-right whitespace-nowrap">
+                          {o.status === 'pending' && canManageFinance ? (
+                            <div className="flex gap-2 justify-end">
+                              <button
+                                onClick={() => approveOffering(o)}
+                                disabled={processingOffer === o.id}
+                                className="text-xs font-semibold bg-emerald-600 hover:bg-emerald-700 text-white px-3 py-1.5 rounded-lg transition-colors disabled:opacity-50"
+                              >
+                                {processingOffer === o.id ? '...' : 'Approve'}
+                              </button>
+                              <button
+                                onClick={() => rejectOffering(o)}
+                                disabled={processingOffer === o.id}
+                                className="text-xs font-semibold text-red-500 hover:text-red-700 px-2 py-1.5 rounded-lg transition-colors disabled:opacity-50"
+                              >
+                                Reject
+                              </button>
+                            </div>
+                          ) : (
+                            <span className="text-xs text-gray-300">—</span>
+                          )}
+                        </td>
                       </tr>
                     ))}
                   </tbody>

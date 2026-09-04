@@ -7,6 +7,7 @@ import { useAppUser } from "../../../../lib/useAppUser";
 import { useTeamMembers } from "../../../../lib/useTeamMembers";
 import { notifyAssignee } from "../../../../lib/visitorMinistry";
 import NotesPanel from "../../../components/NotesPanel";
+import ChecklistWorkflowView from "./ChecklistWorkflowView";
 import {
   doc,
   getDoc,
@@ -38,6 +39,7 @@ interface Workflow {
   active: boolean;
   stepCount: number;
   instanceCount: number;
+  mode?: "sequence" | "checklist";
 }
 
 interface WorkflowStep {
@@ -129,7 +131,7 @@ function addDays(days: number): string {
   return d.toISOString().split("T")[0];
 }
 
-export default function WorkflowBuilderPage() {
+function SequenceWorkflowBuilder() {
   const { workflowId } = useParams<{ workflowId: string }>();
   const { tenantId, appUser } = useAppUser();
   const { team } = useTeamMembers(tenantId);
@@ -1083,4 +1085,33 @@ export default function WorkflowBuilderPage() {
       )}
     </div>
   );
+}
+
+// Route to the right view by mode. Checklist workflows (dateless, recurring SOPs)
+// have a completely different lifecycle from automated sequences, so they render
+// their own component. Reading the mode first also keeps a cell leader off the
+// sequence code path, which subscribes to instances they cannot read.
+export default function WorkflowDetailPage() {
+  const { workflowId } = useParams<{ workflowId: string }>();
+  const [mode, setMode] = useState<"sequence" | "checklist" | null>(null);
+  const [ready, setReady] = useState(false);
+
+  useEffect(() => {
+    if (!workflowId) return;
+    getDoc(doc(db, "workflows", workflowId))
+      .then((snap) => setMode((snap.data()?.mode as "checklist" | "sequence") || "sequence"))
+      .catch(() => setMode("sequence"))
+      .finally(() => setReady(true));
+  }, [workflowId]);
+
+  if (!ready) {
+    return (
+      <div className="flex items-center justify-center h-64">
+        <div className="w-6 h-6 border-2 border-emerald-500 border-t-transparent rounded-full animate-spin" />
+      </div>
+    );
+  }
+
+  if (mode === "checklist") return <ChecklistWorkflowView workflowId={workflowId} />;
+  return <SequenceWorkflowBuilder />;
 }
