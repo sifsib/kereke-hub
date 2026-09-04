@@ -141,7 +141,7 @@ export async function notifyAssignee(payload: {
   assigneeUid: string;
   subjectName: string;
   subjectPhone?: string;
-  kind?: "visitor" | "member" | "workflow";
+  kind?: "visitor" | "member" | "workflow" | "care";
   reason?: string;
   note?: string;
 }): Promise<void> {
