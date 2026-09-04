@@ -37,12 +37,15 @@ interface CareTiers {
 
 interface MemberData {
   role: string;
+  status?: string;
 }
 
 interface MetricSummary {
   totalMembers: number;
   leadershipCount: number;
   standardMembersCount: number;
+  activeStandardMembersCount: number;
+  suspendedCount: number;
 }
 
 interface FollowUpNote {
@@ -60,6 +63,8 @@ export default function AnalyticsPage() {
     totalMembers: 0,
     leadershipCount: 0,
     standardMembersCount: 0,
+    activeStandardMembersCount: 0,
+    suspendedCount: 0,
   });
   const [roleChartData, setRoleChartData] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
@@ -110,16 +115,29 @@ export default function AnalyticsPage() {
         const leadershipRoles = ["Pastor", "Treasurer", "Branch Administrator", "Youth Leader"];
         let leadership = 0;
         let standard = 0;
+        let activeStandard = 0;
+        let suspended = 0;
         const roleCounts: { [key: string]: number } = {
           Member: 0, Pastor: 0, "Youth Leader": 0, Treasurer: 0, "Branch Administrator": 0,
         };
 
         rawMembers.forEach((m) => {
-          if (leadershipRoles.includes(m.role)) { leadership++; } else { standard++; }
+          const isSuspended = m.status === "suspended";
+          if (isSuspended) suspended++;
+          if (leadershipRoles.includes(m.role)) { leadership++; } else {
+            standard++;
+            if (!isSuspended) activeStandard++;
+          }
           if (roleCounts[m.role] !== undefined) { roleCounts[m.role]++; } else { roleCounts[m.role] = 1; }
         });
 
-        setMetrics({ totalMembers: total, leadershipCount: leadership, standardMembersCount: standard });
+        setMetrics({
+          totalMembers: total,
+          leadershipCount: leadership,
+          standardMembersCount: standard,
+          activeStandardMembersCount: activeStandard,
+          suspendedCount: suspended,
+        });
         setRoleChartData(Object.keys(roleCounts).map((role) => ({ name: role, Count: roleCounts[role] })));
 
         // Fetch only Sunday attendance records
@@ -603,7 +621,7 @@ export default function AnalyticsPage() {
       </div>
 
       {/* Metric cards */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+      <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-6">
         <div className="bg-white border border-gray-200 rounded-xl p-6 shadow-sm">
           <p className="text-sm font-semibold text-gray-500 mb-4">Total Registered Members</p>
           <h3 className="text-4xl font-black text-gray-900">{metrics.totalMembers}</h3>
@@ -614,8 +632,12 @@ export default function AnalyticsPage() {
           <p className="text-sm text-gray-500 mt-2">Active administrators and pastors</p>
         </div>
         <div className="bg-white border border-gray-200 rounded-xl p-6 shadow-sm">
-          <p className="text-sm font-semibold text-gray-500 mb-4">General Congregation</p>
-          <h3 className="text-4xl font-black text-gray-900">{metrics.standardMembersCount}</h3>
+          <p className="text-sm font-semibold text-gray-500 mb-4">Active General Congregation</p>
+          <h3 className="text-4xl font-black text-gray-900">{metrics.activeStandardMembersCount}</h3>
+        </div>
+        <div className="bg-white border border-gray-200 rounded-xl p-6 shadow-sm">
+          <p className="text-sm font-semibold text-gray-500 mb-4">Suspended</p>
+          <h3 className="text-4xl font-black text-gray-900">{metrics.suspendedCount}</h3>
         </div>
       </div>
 

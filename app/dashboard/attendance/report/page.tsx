@@ -183,7 +183,14 @@ export default function AttendanceReportPage() {
           : query(collection(db, "members"), where("tenantId", "==", tenantId));
         const mSnap = await getDocs(mQuery);
         const mList: Member[] = [];
-        mSnap.forEach(d => mList.push({ id: d.id, ...d.data() } as Member));
+        // Suspended members don't count toward attendance stats — the whole
+        // report (overall %, cell group breakdown, falling-off alerts, by-member
+        // list) should run on active members only.
+        mSnap.forEach(d => {
+          const data = d.data() as any;
+          if (data.status === "suspended") return;
+          mList.push({ id: d.id, ...data } as Member);
+        });
         mList.sort((a, b) => a.fullName.localeCompare(b.fullName));
         setMembers(mList);
 

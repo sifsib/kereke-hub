@@ -370,13 +370,17 @@ export default function AttendancePage() {
     return `${y}-${mo}-${d}`;
   };
 
-  const filteredMembers = members.filter(m => {
-    // Suspended members are hidden from attendance entirely — they don't
-    // affect present/absent counts while suspended.
+  // Suspended members are hidden from attendance entirely — they don't affect
+  // present/absent counts, or any of the filter chip counts, while suspended.
+  // Also hide members from services that pre-date their capture.
+  const eligibleMembers = members.filter(m => {
     if (m.status === "suspended") return false;
-    // Hide members from services that pre-date their capture.
     const eligibleFrom = earliestEligibleDate(m);
     if (eligibleFrom && selectedDate && selectedDate < eligibleFrom) return false;
+    return true;
+  });
+
+  const filteredMembers = eligibleMembers.filter(m => {
     if (filterType === "branch") return m.branch === filterValue;
     if (filterType === "cellRegion") return m.cellRegion === filterValue;
     if (filterType === "ministryGroup") return m.ministryGroup === filterValue;
@@ -590,7 +594,7 @@ export default function AttendancePage() {
                   onClick={() => { setFilterType("all"); setFilterValue(""); }}
                   className={`text-xs px-3 py-1 rounded-full font-semibold border transition-colors ${filterType === "all" ? "bg-blue-100 text-blue-700 border-blue-300" : "bg-white text-gray-500 border-gray-200 hover:bg-gray-100"}`}
                 >
-                  All ({members.length})
+                  All ({eligibleMembers.length})
                 </button>
 
                 {configBranches.length > 0 && (
