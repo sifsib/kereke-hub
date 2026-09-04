@@ -3,10 +3,12 @@
 import { useEffect, useMemo, useState } from "react";
 import { db } from "../../../lib/firebase";
 import { useAppUser } from "../../../lib/useAppUser";
+import ExportMemberButton from "../../components/ExportMemberButton";
 import {
   collection,
   query,
   where,
+  getDoc,
   getDocs,
   doc,
   updateDoc,
@@ -16,15 +18,26 @@ import {
 // ────────────────────────────────────────────────────────────────────────────
 // CLASS TRACKING
 //
-// Tracks each member through two church classes: the Membership Class and the
-// Discipleship Class. Each is Not Started / In Progress / Completed with a
-// completion date. Staff update inline from the list or in bulk for many
-// members at once. This is separate from `membershipType` (the kind of
-// membership a person is seeking), which it must never be confused with.
+// Tracks each member through the classes a church runs (Membership, Discipleship,
+// Baptism, and any others the church defines). Each class is Not Started /
+// In Progress / Completed with a completion date. Owner/admin manage the list of
+// class types; staff update member progress inline or in bulk, filter, and export
+// to CSV/Excel. This is separate from `membershipType` (the kind of membership a
+// person is seeking), which it must never be confused with.
+//
+// A church's class types live on the tenant doc (tenant.classTypes), the same
+// place cell groups and membership types are stored. Each member keeps a per-type
+// status map at member.classes[typeId] = { status, date }. For the two built-in
+// defaults we fall back to the original flat fields so nothing captured before
+// this change is lost.
 // ────────────────────────────────────────────────────────────────────────────
 
 type ClassStatus = "not_started" | "in_progress" | "completed";
-type ClassKey = "membership" | "discipleship";
+
+interface ClassType {
+  id: string;
+  name: string;
+}
 
 const STATUS_OPTIONS: { value: ClassStatus; label: string }[] = [
   { value: "not_started", label: "Not Started" },
@@ -32,26 +45,43 @@ const STATUS_OPTIONS: { value: ClassStatus; label: string }[] = [
   { value: "completed", label: "Completed" },
 ];
 
+const STATUS_LABEL: Record<ClassStatus, string> = {
+  not_started: "Not Started",
+  in_progress: "In Progress",
+  completed: "Completed",
+};
+
 const STATUS_STYLE: Record<ClassStatus, string> = {
   not_started: "bg-gray-100 text-gray-500 border-gray-200",
   in_progress: "bg-amber-50 text-amber-700 border-amber-200",
   completed: "bg-emerald-50 text-emerald-700 border-emerald-200",
 };
 
-// Field names on the member doc for each class column.
-const FIELDS: Record<ClassKey, { status: string; date: string; label: string }> = {
-  membership: { status: "membershipClassStatus", date: "membershipClassDate", label: "Membership Class" },
-  discipleship: { status: "discipleshipClassStatus", date: "discipleshipClassDate", label: "Discipleship Class" },
+// The two class types every church starts with. Their ids are stable so the
+// legacy flat fields keep resolving even after a church renames them.
+const DEFAULT_CLASS_TYPES: ClassType[] = [
+  { id: "membership", name: "Membership Class" },
+  { id: "discipleship", name: "Discipleship Class" },
+];
+
+// Legacy flat fields, only for the two built-in class ids.
+const LEGACY_FIELDS: Record<string, { status: string; date: string }> = {
+  membership: { status: "membershipClassStatus", date: "membershipClassDate" },
+  discipleship: { status: "discipleshipClassStatus", date: "discipleshipClassDate" },
 };
+
+interface ClassState {
+  status: ClassStatus;
+  date: string;
+}
 
 interface MemberRow {
   id: string;
   name: string;
   cellRegion: string;
-  membershipClassStatus: ClassStatus;
-  membershipClassDate: string;
-  discipleshipClassStatus: ClassStatus;
-  discipleshipClassDate: string;
+  // Explicit per-type map from member.classes, plus legacy fallbacks kept aside.
+  classes: Record<string, ClassState>;
+  legacy: Record<string, ClassState>;
 }
 
 const todayStr = () => new Date().toISOString().split("T")[0];
@@ -60,111 +90,128 @@ function asStatus(v: unknown): ClassStatus {
   return v === "in_progress" || v === "completed" ? v : "not_started";
 }
 
+function newTypeId() {
+  return `t_${Math.random().toString(36).slice(2, 9)}`;
+}
+
 export default function ClassesPage() {
   const { appUser, tenantId, loading: userLoading } = useAppUser();
-  const canEdit = ["owner", "admin", "member_manager", "branch_admin"].includes(appUser?.role || "");
+  const role = appUser?.role || "";
+  const canEdit = ["owner", "admin", "member_manager", "branch_admin"].includes(role);
+  const canManageTypes = ["owner", "admin"].includes(role);
 
+  const [classTypes, setClassTypes] = useState<ClassType[]>(DEFAULT_CLASS_TYPES);
   const [rows, setRows] = useState<MemberRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
-  const [membershipFilter, setMembershipFilter] = useState<ClassStatus | "all">("all");
-  const [discipleshipFilter, setDiscipleshipFilter] = useState<ClassStatus | "all">("all");
+  const [filterType, setFilterType] = useState<string>("all");
+  const [filterStatus, setFilterStatus] = useState<ClassStatus | "all">("all");
 
   const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [bulkColumn, setBulkColumn] = useState<ClassKey>("membership");
+  const [bulkType, setBulkType] = useState<string>("");
   const [bulkStatus, setBulkStatus] = useState<ClassStatus>("completed");
   const [applying, setApplying] = useState(false);
+
+  // Manage-classes modal (owner/admin)
+  const [showManage, setShowManage] = useState(false);
+  const [draftTypes, setDraftTypes] = useState<ClassType[]>([]);
+  const [savingTypes, setSavingTypes] = useState(false);
 
   useEffect(() => {
     if (!tenantId) return;
     setLoading(true);
-    getDocs(query(collection(db, "members"), where("tenantId", "==", tenantId)))
-      .then((snap) => {
-        const list: MemberRow[] = snap.docs
+    Promise.all([
+      getDoc(doc(db, "tenants", tenantId)),
+      getDocs(query(collection(db, "members"), where("tenantId", "==", tenantId))),
+    ])
+      .then(([tenantSnap, memberSnap]) => {
+        const tData = tenantSnap.data() as Record<string, unknown> | undefined;
+        const configured = Array.isArray(tData?.classTypes) ? (tData!.classTypes as ClassType[]) : null;
+        const types =
+          configured && configured.length > 0
+            ? configured.filter((t) => t && t.id && t.name)
+            : DEFAULT_CLASS_TYPES;
+        setClassTypes(types);
+        setBulkType((prev) => prev || types[0]?.id || "");
+
+        const list: MemberRow[] = memberSnap.docs
           .map((d) => {
             const data = d.data() as Record<string, unknown>;
-            // Leave suspended members out, matching the rest of the active views.
             if (data.status === "suspended") return null;
             const name =
               (data.fullName as string) ||
               `${(data.firstName as string) || ""} ${(data.lastName as string) || ""}`.trim();
-            return {
-              id: d.id,
-              name: name || "(no name)",
-              cellRegion: (data.cellRegion as string) || "",
-              membershipClassStatus: asStatus(data.membershipClassStatus),
-              membershipClassDate: (data.membershipClassDate as string) || "",
-              discipleshipClassStatus: asStatus(data.discipleshipClassStatus),
-              discipleshipClassDate: (data.discipleshipClassDate as string) || "",
-            };
+            const rawClasses = (data.classes as Record<string, { status?: unknown; date?: unknown }>) || {};
+            const classes: Record<string, ClassState> = {};
+            for (const [k, v] of Object.entries(rawClasses)) {
+              classes[k] = { status: asStatus(v?.status), date: (v?.date as string) || "" };
+            }
+            const legacy: Record<string, ClassState> = {};
+            for (const [id, f] of Object.entries(LEGACY_FIELDS)) {
+              legacy[id] = { status: asStatus(data[f.status]), date: (data[f.date] as string) || "" };
+            }
+            return { id: d.id, name: name || "(no name)", cellRegion: (data.cellRegion as string) || "", classes, legacy };
           })
           .filter((m): m is MemberRow => m !== null)
           .sort((a, b) => a.name.localeCompare(b.name));
         setRows(list);
       })
-      .catch((err) => console.error("Failed to load members:", err))
+      .catch((err) => console.error("Failed to load classes:", err))
       .finally(() => setLoading(false));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tenantId]);
+
+  // Effective status for a member+type: explicit map wins, then legacy fallback
+  // for the two built-ins, else Not Started.
+  function stateOf(row: MemberRow, typeId: string): ClassState {
+    return row.classes[typeId] || row.legacy[typeId] || { status: "not_started", date: "" };
+  }
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
     return rows.filter((r) => {
       if (q && !r.name.toLowerCase().includes(q) && !r.cellRegion.toLowerCase().includes(q)) return false;
-      if (membershipFilter !== "all" && r.membershipClassStatus !== membershipFilter) return false;
-      if (discipleshipFilter !== "all" && r.discipleshipClassStatus !== discipleshipFilter) return false;
+      if (filterType !== "all") {
+        const s = stateOf(r, filterType).status;
+        if (filterStatus !== "all" && s !== filterStatus) return false;
+      }
       return true;
     });
-  }, [rows, search, membershipFilter, discipleshipFilter]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rows, search, filterType, filterStatus]);
 
-  // Progress summary across all (unfiltered) members.
-  const summary = useMemo(() => {
-    const count = (key: ClassKey, status: ClassStatus) =>
-      rows.filter((r) => (key === "membership" ? r.membershipClassStatus : r.discipleshipClassStatus) === status).length;
-    return {
-      membershipCompleted: count("membership", "completed"),
-      discipleshipCompleted: count("discipleship", "completed"),
-      total: rows.length,
-    };
-  }, [rows]);
+  const completedCounts = useMemo(() => {
+    const m: Record<string, number> = {};
+    for (const t of classTypes) m[t.id] = rows.filter((r) => stateOf(r, t.id).status === "completed").length;
+    return m;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rows, classTypes]);
 
-  // Update one member's class. Completion date follows the status: set to a real
-  // date when completed (today unless one is already set), cleared otherwise.
-  async function setStatus(row: MemberRow, key: ClassKey, status: ClassStatus) {
+  async function setStatus(row: MemberRow, typeId: string, status: ClassStatus) {
     if (!canEdit) return;
-    const f = FIELDS[key];
-    const existingDate = key === "membership" ? row.membershipClassDate : row.discipleshipClassDate;
-    const date = status === "completed" ? existingDate || todayStr() : "";
-    // Optimistic local update.
+    const existing = stateOf(row, typeId);
+    const date = status === "completed" ? existing.date || todayStr() : "";
     setRows((prev) =>
-      prev.map((r) =>
-        r.id === row.id
-          ? key === "membership"
-            ? { ...r, membershipClassStatus: status, membershipClassDate: date }
-            : { ...r, discipleshipClassStatus: status, discipleshipClassDate: date }
-          : r
-      )
+      prev.map((r) => (r.id === row.id ? { ...r, classes: { ...r.classes, [typeId]: { status, date } } } : r))
     );
     try {
-      await updateDoc(doc(db, "members", row.id), { [f.status]: status, [f.date]: date });
+      await updateDoc(doc(db, "members", row.id), {
+        [`classes.${typeId}.status`]: status,
+        [`classes.${typeId}.date`]: date,
+      });
     } catch (err) {
       console.error("Failed to update class status:", err);
     }
   }
 
-  async function setDate(row: MemberRow, key: ClassKey, date: string) {
+  async function setDate(row: MemberRow, typeId: string, date: string) {
     if (!canEdit) return;
-    const f = FIELDS[key];
+    const status = stateOf(row, typeId).status;
     setRows((prev) =>
-      prev.map((r) =>
-        r.id === row.id
-          ? key === "membership"
-            ? { ...r, membershipClassDate: date }
-            : { ...r, discipleshipClassDate: date }
-          : r
-      )
+      prev.map((r) => (r.id === row.id ? { ...r, classes: { ...r.classes, [typeId]: { status, date } } } : r))
     );
     try {
-      await updateDoc(doc(db, "members", row.id), { [f.date]: date });
+      await updateDoc(doc(db, "members", row.id), { [`classes.${typeId}.date`]: date });
     } catch (err) {
       console.error("Failed to update completion date:", err);
     }
@@ -181,34 +228,30 @@ export default function ClassesPage() {
 
   function toggleSelectAll() {
     setSelected((prev) => {
-      const allShown = filtered.every((r) => prev.has(r.id)) && filtered.length > 0;
-      if (allShown) return new Set();
-      return new Set(filtered.map((r) => r.id));
+      const allShown = filtered.length > 0 && filtered.every((r) => prev.has(r.id));
+      return allShown ? new Set() : new Set(filtered.map((r) => r.id));
     });
   }
 
   async function applyBulk() {
-    if (!canEdit || selected.size === 0) return;
+    if (!canEdit || selected.size === 0 || !bulkType) return;
     setApplying(true);
-    const f = FIELDS[bulkColumn];
     const date = bulkStatus === "completed" ? todayStr() : "";
     try {
-      // Firestore batches cap at 500 writes; chunk to be safe.
       const ids = Array.from(selected);
       for (let i = 0; i < ids.length; i += 400) {
         const batch = writeBatch(db);
         ids.slice(i, i + 400).forEach((id) => {
-          batch.update(doc(db, "members", id), { [f.status]: bulkStatus, [f.date]: date });
+          batch.update(doc(db, "members", id), {
+            [`classes.${bulkType}.status`]: bulkStatus,
+            [`classes.${bulkType}.date`]: date,
+          });
         });
         await batch.commit();
       }
       setRows((prev) =>
         prev.map((r) =>
-          selected.has(r.id)
-            ? bulkColumn === "membership"
-              ? { ...r, membershipClassStatus: bulkStatus, membershipClassDate: date }
-              : { ...r, discipleshipClassStatus: bulkStatus, discipleshipClassDate: date }
-            : r
+          selected.has(r.id) ? { ...r, classes: { ...r.classes, [bulkType]: { status: bulkStatus, date } } } : r
         )
       );
       setSelected(new Set());
@@ -220,6 +263,72 @@ export default function ClassesPage() {
     }
   }
 
+  // ── Manage class types (owner/admin) ──────────────────────────────────────
+
+  function openManage() {
+    setDraftTypes(classTypes.map((t) => ({ ...t })));
+    setShowManage(true);
+  }
+
+  function addDraftType() {
+    setDraftTypes((prev) => [...prev, { id: newTypeId(), name: "" }]);
+  }
+
+  function updateDraftName(id: string, name: string) {
+    setDraftTypes((prev) => prev.map((t) => (t.id === id ? { ...t, name } : t)));
+  }
+
+  function removeDraftType(id: string) {
+    setDraftTypes((prev) => prev.filter((t) => t.id !== id));
+  }
+
+  async function saveTypes() {
+    if (!tenantId || !canManageTypes) return;
+    const cleaned = draftTypes
+      .map((t) => ({ id: t.id, name: t.name.trim() }))
+      .filter((t) => t.name.length > 0);
+    setSavingTypes(true);
+    try {
+      await updateDoc(doc(db, "tenants", tenantId), { classTypes: cleaned });
+      setClassTypes(cleaned);
+      if (!cleaned.some((t) => t.id === bulkType)) setBulkType(cleaned[0]?.id || "");
+      if (filterType !== "all" && !cleaned.some((t) => t.id === filterType)) setFilterType("all");
+      setShowManage(false);
+    } catch (err) {
+      console.error("Failed to save class types:", err);
+      alert("Could not save the class list. Only owners and admins can change it.");
+    } finally {
+      setSavingTypes(false);
+    }
+  }
+
+  // ── Export data ───────────────────────────────────────────────────────────
+
+  const exportColumns = useMemo(() => {
+    const cols: { key: string; label: string }[] = [
+      { key: "name", label: "Member" },
+      { key: "cellRegion", label: "Cell Group" },
+    ];
+    for (const t of classTypes) {
+      cols.push({ key: `${t.id}__status`, label: `${t.name} — Status` });
+      cols.push({ key: `${t.id}__date`, label: `${t.name} — Completed` });
+    }
+    return cols;
+  }, [classTypes]);
+
+  const exportData = useMemo(() => {
+    return filtered.map((r) => {
+      const row: Record<string, string> = { name: r.name, cellRegion: r.cellRegion || "" };
+      for (const t of classTypes) {
+        const s = stateOf(r, t.id);
+        row[`${t.id}__status`] = STATUS_LABEL[s.status];
+        row[`${t.id}__date`] = s.status === "completed" ? s.date : "";
+      }
+      return row;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filtered, classTypes]);
+
   if (userLoading || loading) {
     return (
       <div className="flex items-center justify-center h-64">
@@ -228,15 +337,16 @@ export default function ClassesPage() {
     );
   }
 
-  const renderCell = (row: MemberRow, key: ClassKey) => {
-    const status = key === "membership" ? row.membershipClassStatus : row.discipleshipClassStatus;
-    const date = key === "membership" ? row.membershipClassDate : row.discipleshipClassDate;
+  const allShownSelected = filtered.length > 0 && filtered.every((r) => selected.has(r.id));
+
+  const renderCell = (row: MemberRow, typeId: string) => {
+    const { status, date } = stateOf(row, typeId);
     return (
       <div className="flex flex-col gap-1">
         {canEdit ? (
           <select
             value={status}
-            onChange={(e) => setStatus(row, key, e.target.value as ClassStatus)}
+            onChange={(e) => setStatus(row, typeId, e.target.value as ClassStatus)}
             className={`text-xs font-semibold border rounded-lg px-2 py-1 focus:outline-none focus:ring-2 focus:ring-emerald-500 ${STATUS_STYLE[status]}`}
           >
             {STATUS_OPTIONS.map((o) => (
@@ -245,7 +355,7 @@ export default function ClassesPage() {
           </select>
         ) : (
           <span className={`inline-flex text-xs font-semibold border rounded-full px-2 py-0.5 ${STATUS_STYLE[status]}`}>
-            {STATUS_OPTIONS.find((o) => o.value === status)?.label}
+            {STATUS_LABEL[status]}
           </span>
         )}
         {status === "completed" &&
@@ -254,7 +364,7 @@ export default function ClassesPage() {
               type="date"
               value={date}
               max={todayStr()}
-              onChange={(e) => setDate(row, key, e.target.value)}
+              onChange={(e) => setDate(row, typeId, e.target.value)}
               className="text-xs border border-gray-200 rounded px-1.5 py-0.5 text-gray-500 focus:outline-none focus:ring-1 focus:ring-emerald-500"
             />
           ) : (
@@ -264,31 +374,40 @@ export default function ClassesPage() {
     );
   };
 
-  const allShownSelected = filtered.length > 0 && filtered.every((r) => selected.has(r.id));
-
   return (
     <div>
-      <div className="mb-6">
-        <h1 className="text-2xl font-bold text-gray-900">Classes</h1>
-        <p className="text-sm text-gray-500 mt-1">
-          Track members through the Membership and Discipleship classes. This is separate from the type of membership a person is seeking.
-        </p>
+      <div className="mb-6 flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h1 className="text-2xl font-bold text-gray-900">Classes</h1>
+          <p className="text-sm text-gray-500 mt-1">
+            Track members through your church's classes. This is separate from the type of membership a person is seeking.
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          {canManageTypes && (
+            <button
+              onClick={openManage}
+              className="text-sm font-semibold text-gray-600 hover:text-gray-900 bg-white border border-gray-200 hover:border-gray-300 px-3 py-2 rounded-lg transition-colors"
+            >
+              ⚙️ Manage classes
+            </button>
+          )}
+          <ExportMemberButton data={exportData} filename="class-tracking" columns={exportColumns} />
+        </div>
       </div>
 
       {/* Summary */}
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-5">
-        <div className="bg-white border border-gray-200 rounded-xl p-4">
+      <div className="flex flex-wrap gap-3 mb-5">
+        <div className="bg-white border border-gray-200 rounded-xl px-4 py-3">
           <p className="text-xs text-gray-500">Members</p>
-          <p className="text-2xl font-bold text-gray-900">{summary.total}</p>
+          <p className="text-xl font-bold text-gray-900">{rows.length}</p>
         </div>
-        <div className="bg-white border border-gray-200 rounded-xl p-4">
-          <p className="text-xs text-gray-500">Membership Class completed</p>
-          <p className="text-2xl font-bold text-emerald-700">{summary.membershipCompleted}</p>
-        </div>
-        <div className="bg-white border border-gray-200 rounded-xl p-4">
-          <p className="text-xs text-gray-500">Discipleship Class completed</p>
-          <p className="text-2xl font-bold text-emerald-700">{summary.discipleshipCompleted}</p>
-        </div>
+        {classTypes.map((t) => (
+          <div key={t.id} className="bg-white border border-gray-200 rounded-xl px-4 py-3">
+            <p className="text-xs text-gray-500">{t.name} completed</p>
+            <p className="text-xl font-bold text-emerald-700">{completedCounts[t.id] ?? 0}</p>
+          </div>
+        ))}
       </div>
 
       {/* Filters */}
@@ -304,24 +423,25 @@ export default function ClassesPage() {
           />
         </div>
         <div>
-          <label className="block text-xs font-medium text-gray-500 mb-1">Membership Class</label>
+          <label className="block text-xs font-medium text-gray-500 mb-1">Class</label>
           <select
-            value={membershipFilter}
-            onChange={(e) => setMembershipFilter(e.target.value as ClassStatus | "all")}
+            value={filterType}
+            onChange={(e) => setFilterType(e.target.value)}
             className="border border-gray-300 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-emerald-500"
           >
-            <option value="all">All statuses</option>
-            {STATUS_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+            <option value="all">All classes</option>
+            {classTypes.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
           </select>
         </div>
         <div>
-          <label className="block text-xs font-medium text-gray-500 mb-1">Discipleship Class</label>
+          <label className="block text-xs font-medium text-gray-500 mb-1">Status</label>
           <select
-            value={discipleshipFilter}
-            onChange={(e) => setDiscipleshipFilter(e.target.value as ClassStatus | "all")}
-            className="border border-gray-300 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-emerald-500"
+            value={filterStatus}
+            onChange={(e) => setFilterStatus(e.target.value as ClassStatus | "all")}
+            disabled={filterType === "all"}
+            className="border border-gray-300 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-emerald-500 disabled:bg-gray-50 disabled:text-gray-400"
           >
-            <option value="all">All statuses</option>
+            <option value="all">Any status</option>
             {STATUS_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
           </select>
         </div>
@@ -333,12 +453,11 @@ export default function ClassesPage() {
           <span className="text-sm font-semibold text-emerald-800">{selected.size} selected</span>
           <span className="text-sm text-emerald-700">Set</span>
           <select
-            value={bulkColumn}
-            onChange={(e) => setBulkColumn(e.target.value as ClassKey)}
+            value={bulkType}
+            onChange={(e) => setBulkType(e.target.value)}
             className="border border-emerald-200 rounded-lg px-2 py-1.5 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-emerald-500"
           >
-            <option value="membership">Membership Class</option>
-            <option value="discipleship">Discipleship Class</option>
+            {classTypes.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
           </select>
           <span className="text-sm text-emerald-700">to</span>
           <select
@@ -350,15 +469,12 @@ export default function ClassesPage() {
           </select>
           <button
             onClick={applyBulk}
-            disabled={applying}
+            disabled={applying || !bulkType}
             className="bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white text-sm font-semibold px-4 py-1.5 rounded-lg transition-colors"
           >
             {applying ? "Applying…" : "Apply"}
           </button>
-          <button
-            onClick={() => setSelected(new Set())}
-            className="text-sm text-emerald-700 hover:text-emerald-900 font-medium ml-auto"
-          >
+          <button onClick={() => setSelected(new Set())} className="text-sm text-emerald-700 hover:text-emerald-900 font-medium ml-auto">
             Clear
           </button>
         </div>
@@ -366,7 +482,11 @@ export default function ClassesPage() {
 
       {/* Table */}
       <div className="bg-white border border-gray-200 rounded-xl overflow-hidden">
-        {filtered.length === 0 ? (
+        {classTypes.length === 0 ? (
+          <div className="p-12 text-center text-sm text-gray-400">
+            No classes set up yet.{canManageTypes ? " Use “Manage classes” to add one." : " Ask your church admin to add one."}
+          </div>
+        ) : filtered.length === 0 ? (
           <div className="p-12 text-center text-sm text-gray-400">
             {rows.length === 0 ? "No members yet." : "No members match your filters."}
           </div>
@@ -388,8 +508,11 @@ export default function ClassesPage() {
                   )}
                   <th className="text-left px-4 py-3 text-xs font-bold text-gray-500 uppercase tracking-wider">Member</th>
                   <th className="text-left px-4 py-3 text-xs font-bold text-gray-500 uppercase tracking-wider">Cell Group</th>
-                  <th className="text-left px-4 py-3 text-xs font-bold text-gray-500 uppercase tracking-wider">Membership Class</th>
-                  <th className="text-left px-4 py-3 text-xs font-bold text-gray-500 uppercase tracking-wider">Discipleship Class</th>
+                  {classTypes.map((t) => (
+                    <th key={t.id} className="text-left px-4 py-3 text-xs font-bold text-gray-500 uppercase tracking-wider whitespace-nowrap">
+                      {t.name}
+                    </th>
+                  ))}
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100">
@@ -408,8 +531,9 @@ export default function ClassesPage() {
                     )}
                     <td className="px-4 py-3 font-medium text-gray-900">{row.name}</td>
                     <td className="px-4 py-3 text-gray-500">{row.cellRegion || "—"}</td>
-                    <td className="px-4 py-3">{renderCell(row, "membership")}</td>
-                    <td className="px-4 py-3">{renderCell(row, "discipleship")}</td>
+                    {classTypes.map((t) => (
+                      <td key={t.id} className="px-4 py-3">{renderCell(row, t.id)}</td>
+                    ))}
                   </tr>
                 ))}
               </tbody>
@@ -417,6 +541,62 @@ export default function ClassesPage() {
           </div>
         )}
       </div>
+
+      {/* Manage classes modal */}
+      {showManage && canManageTypes && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-md p-6 max-h-[85vh] overflow-y-auto">
+            <h2 className="text-lg font-bold text-gray-900 mb-1">Manage classes</h2>
+            <p className="text-xs text-gray-500 mb-4">
+              Rename a class, or add one your church runs (for example Baptism or Foundations). Removing a class hides its column; any progress already captured stays on the member records.
+            </p>
+            <div className="space-y-2 mb-4">
+              {draftTypes.length === 0 && (
+                <p className="text-sm text-gray-400">No classes yet. Add your first below.</p>
+              )}
+              {draftTypes.map((t) => (
+                <div key={t.id} className="flex items-center gap-2">
+                  <input
+                    type="text"
+                    value={t.name}
+                    onChange={(e) => updateDraftName(t.id, e.target.value)}
+                    placeholder="Class name"
+                    className="flex-1 border border-gray-300 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                  />
+                  <button
+                    onClick={() => removeDraftType(t.id)}
+                    className="p-1.5 text-red-400 hover:text-red-600"
+                    aria-label="Remove class"
+                  >
+                    ✕
+                  </button>
+                </div>
+              ))}
+            </div>
+            <button
+              onClick={addDraftType}
+              className="w-full border-2 border-dashed border-gray-200 hover:border-emerald-400 text-gray-400 hover:text-emerald-600 rounded-lg py-2 text-sm font-medium transition-colors mb-5"
+            >
+              + Add class
+            </button>
+            <div className="flex gap-3">
+              <button
+                onClick={() => setShowManage(false)}
+                className="flex-1 border border-gray-300 text-gray-700 text-sm font-medium py-2 rounded-lg hover:bg-gray-50 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={saveTypes}
+                disabled={savingTypes}
+                className="flex-1 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white text-sm font-semibold py-2 rounded-lg transition-colors"
+              >
+                {savingTypes ? "Saving…" : "Save classes"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
