@@ -1017,7 +1017,9 @@ service cloud.firestore {
     }
 
     // ============================================
-    // PASTORAL CARE LOGS (sensitive - owner and admin only)
+    // PASTORAL CARE LOGS (sensitive - owner and admin READ/manage only)
+    // Cell leaders may CREATE a note for their group (tagged source
+    // 'cell_group'), but never read or manage the queue.
     // ============================================
     match /care_logs/{id} {
       allow read: if isSignedIn()
@@ -1025,7 +1027,8 @@ service cloud.firestore {
                   && (isSuperAdmin() || hasRole('owner') || hasRole('admin'));
       allow create: if isSignedIn()
                     && tenantAllowedWrite(request.resource.data)
-                    && (isSuperAdmin() || hasRole('owner') || hasRole('admin'));
+                    && (isSuperAdmin() || hasRole('owner') || hasRole('admin')
+                    || (hasRole('cell_leader') && request.resource.data.source == 'cell_group'));
       allow update: if isSignedIn()
                     && tenantAllowed(resource)
                     && request.resource.data.tenantId == resource.data.tenantId
