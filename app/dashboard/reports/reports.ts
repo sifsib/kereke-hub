@@ -42,7 +42,17 @@ export interface ReportDef {
   roles: string[];
   dateRange?: boolean;
   scope?: "none" | "cellRegion" | "branch";
+  // Whether this report may be scheduled and emailed. Left off the sensitive
+  // reports (giving-by-member, pastoral care) on purpose, so they are never
+  // auto-emailed on a cadence.
+  schedulable?: boolean;
   run: (ctx: ReportContext) => Promise<ReportResult>;
+}
+
+// The reports a church may schedule for email, kept in sync with the server-side
+// generators in functions/src/reportGen.ts.
+export function schedulableReports(): ReportDef[] {
+  return REPORTS.filter((r) => r.schedulable);
 }
 
 // ── shared helpers ──────────────────────────────────────────────────────────
@@ -150,6 +160,7 @@ function tsToDate(v: unknown): string {
 export const REPORTS: ReportDef[] = [
   {
     id: "membership_directory",
+    schedulable: true,
     title: "Membership Directory",
     description: "Every active member with their group, branch, membership type and contact details.",
     group: "People",
@@ -186,6 +197,7 @@ export const REPORTS: ReportDef[] = [
 
   {
     id: "class_progress",
+    schedulable: true,
     title: "Class Progress",
     description: "Each member's status in every class the church runs, with completion dates.",
     group: "Discipleship",
@@ -223,6 +235,7 @@ export const REPORTS: ReportDef[] = [
 
   {
     id: "cell_group_summary",
+    schedulable: true,
     title: "Cell Group Summary",
     description: "One row per cell group: how many members, and how many have completed each class.",
     group: "Cell Groups",
@@ -266,6 +279,7 @@ export const REPORTS: ReportDef[] = [
 
   {
     id: "cell_offerings",
+    schedulable: true,
     title: "Cell Group Offerings",
     description: "Offerings submitted by cell groups over a period, with their review status.",
     group: "Finance",
@@ -312,6 +326,7 @@ export const REPORTS: ReportDef[] = [
 
   {
     id: "finance_summary",
+    schedulable: true,
     title: "Income & Expense Summary",
     description: "Totals by category for income and expenses over a period, with the net.",
     group: "Finance",
@@ -400,6 +415,7 @@ export const REPORTS: ReportDef[] = [
   },
   {
     id: "growth",
+    schedulable: true,
     title: "Growth",
     description: "New members joined and members suspended, by month over a period.",
     group: "People",
@@ -451,6 +467,7 @@ export const REPORTS: ReportDef[] = [
 
   {
     id: "visitor_pipeline",
+    schedulable: true,
     title: "Visitor Follow-up Pipeline",
     description: "First-time guests over a period and whether they were followed up.",
     group: "People",
@@ -500,6 +517,7 @@ export const REPORTS: ReportDef[] = [
 
   {
     id: "attendance_trend",
+    schedulable: true,
     title: "Attendance Trend",
     description: "Attendance rate per service date over a period, for your scope.",
     group: "Attendance",
@@ -549,6 +567,7 @@ export const REPORTS: ReportDef[] = [
 
   {
     id: "cell_group_scorecard",
+    schedulable: true,
     title: "Cell Group Scorecard",
     description: "Per group: members, attendance rate, class completions, and (for finance roles) approved offerings.",
     group: "Cell Groups",
