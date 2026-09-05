@@ -77,6 +77,7 @@ export default async function DashboardLayout({
 
   const allNavigation = [
     { name: "Church Overview", href: "/dashboard/analytics", icon: "📊", roles: ["owner", "admin", "viewer", "finance", "member_manager", "member_viewer"] },
+    { name: "Reports", href: "/dashboard/reports", icon: "📈", roles: ["owner", "admin", "member_manager", "member_viewer", "finance", "finance_viewer", "branch_admin", "cell_leader", "follow_up"] },
     { name: "Church Profile", href: "/dashboard/profile", icon: "⛪", roles: ["owner", "admin"] },
     { name: "Membership Management", href: "/dashboard/roster", icon: "👥", roles: ["owner", "admin", "member_manager", "member_viewer", "cell_leader", "branch_admin"] },
     { name: "Classes", href: "/dashboard/classes", icon: "🎓", roles: ["owner", "admin", "member_manager", "member_viewer"] },

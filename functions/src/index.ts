@@ -1557,3 +1557,81 @@ export const inactivityCheck = onSchedule(
     console.log(`[inactivityCheck] Done. ${emailed} reminder(s) sent.`);
   }
 );
+
+// ─────────────────────────────────────────────────────────────
+// SCHEDULED: EMAILED REPORTS
+//
+// Runs daily at 06:00 SAST. For each active report_schedule that is due
+// (monthly on the 1st, weekly on Mondays), generates the report server-side
+// and emails it to the recipients via the church's own Brevo account, with the
+// full report attached as a CSV. Only non-sensitive reports can be scheduled
+// (the config UI only lists those).
+// ─────────────────────────────────────────────────────────────
+import { generateReport, reportToCsv, reportEmailHtml } from "./reportGen";
+
+export const scheduledReports = onSchedule(
+  { schedule: "0 6 * * *", timeZone: "Africa/Johannesburg" }, // 06:00 SAST
+  async () => {
+    // "Today" in SAST (UTC+2, no DST) for the cadence check.
+    const sast = new Date(Date.now() + 2 * 60 * 60 * 1000);
+    const dayOfMonth = sast.getUTCDate();
+    const dayOfWeek = sast.getUTCDay(); // 0 Sun .. 1 Mon
+
+    const snap = await db.collection("report_schedules").where("active", "==", true).get();
+    let sent = 0;
+
+    for (const d of snap.docs) {
+      const s = d.data();
+      const due =
+        (s.cadence === "monthly" && dayOfMonth === 1) ||
+        (s.cadence === "weekly" && dayOfWeek === 1);
+      if (!due) continue;
+
+      // Guard against a double-send if the scheduler retries within the day.
+      const last = s.lastRunAt && typeof s.lastRunAt.toDate === "function" ? s.lastRunAt.toDate() : null;
+      if (last && Date.now() - last.getTime() < 20 * 60 * 60 * 1000) continue;
+
+      try {
+        const tenantSnap = await db.doc(`tenants/${s.tenantId}`).get();
+        const t = tenantSnap.data() || {};
+        const recipients: string[] = Array.isArray(s.recipients) ? s.recipients.filter(Boolean) : [];
+        if (!t.brevoApiKey || !t.brevoSenderEmail) {
+          await d.ref.update({ lastRunAt: new Date(), lastRunStatus: "skipped_no_brevo" });
+          continue;
+        }
+        if (recipients.length === 0) {
+          await d.ref.update({ lastRunAt: new Date(), lastRunStatus: "no_recipients" });
+          continue;
+        }
+        const report = await generateReport(db, s.tenantId, s.reportId, s.cadence);
+        if (!report) {
+          await d.ref.update({ lastRunAt: new Date(), lastRunStatus: "unknown_report" });
+          continue;
+        }
+        const csv = reportToCsv(report.columns, report.rows);
+        const res = await fetch("https://api.brevo.com/v3/smtp/email", {
+          method: "POST",
+          headers: { "api-key": t.brevoApiKey, "content-type": "application/json", accept: "application/json" },
+          body: JSON.stringify({
+            sender: { name: t.brevoSenderName || t.name || "Kereke Hub", email: t.brevoSenderEmail },
+            to: recipients.map((email) => ({ email })),
+            subject: `${report.title} — ${report.meta}`,
+            htmlContent: reportEmailHtml(t.name || "", report),
+            attachment: [{ content: Buffer.from(csv, "utf-8").toString("base64"), name: `${s.reportId}.csv` }],
+          }),
+        });
+        await d.ref.update({ lastRunAt: new Date(), lastRunStatus: res.ok ? "sent" : "brevo_error" });
+        if (res.ok) {
+          sent++;
+        } else {
+          console.error(`[scheduledReports] Brevo error for ${d.id}:`, await res.text().catch(() => ""));
+        }
+      } catch (err) {
+        console.error(`[scheduledReports] Failed for ${d.id}:`, err);
+        await d.ref.update({ lastRunAt: new Date(), lastRunStatus: "error" }).catch(() => {});
+      }
+    }
+
+    console.log(`[scheduledReports] Done. ${sent} report(s) emailed.`);
+  }
+);
