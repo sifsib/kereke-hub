@@ -183,7 +183,7 @@ export default function ReportsPage() {
               href="/dashboard/reports/narrative"
               className="text-sm font-semibold text-gray-600 hover:text-gray-900 bg-white border border-gray-200 hover:border-gray-300 px-3 py-2 rounded-lg transition-colors"
             >
-              📑 Annual report
+              📑 Board overview
             </Link>
             <Link
               href="/dashboard/reports/schedules"
