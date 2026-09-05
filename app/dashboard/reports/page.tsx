@@ -178,12 +178,20 @@ export default function ReportsPage() {
           </p>
         </div>
         {["owner", "admin"].includes(role) && (
-          <Link
-            href="/dashboard/reports/schedules"
-            className="shrink-0 text-sm font-semibold text-gray-600 hover:text-gray-900 bg-white border border-gray-200 hover:border-gray-300 px-3 py-2 rounded-lg transition-colors"
-          >
-            ⏰ Scheduled reports
-          </Link>
+          <div className="shrink-0 flex items-center gap-2">
+            <Link
+              href="/dashboard/reports/narrative"
+              className="text-sm font-semibold text-gray-600 hover:text-gray-900 bg-white border border-gray-200 hover:border-gray-300 px-3 py-2 rounded-lg transition-colors"
+            >
+              📑 Board overview
+            </Link>
+            <Link
+              href="/dashboard/reports/schedules"
+              className="text-sm font-semibold text-gray-600 hover:text-gray-900 bg-white border border-gray-200 hover:border-gray-300 px-3 py-2 rounded-lg transition-colors"
+            >
+              ⏰ Scheduled reports
+            </Link>
+          </div>
         )}
       </div>
 
