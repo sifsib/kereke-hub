@@ -6,8 +6,9 @@
 // Added: "Online Giving" tab showing giving_records from the public giving page.
 // Added: "Manage Categories" button linking to /dashboard/finance/settings
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useMemo } from 'react';
 import { db, storage } from '../../../lib/firebase';
+import { availableYears } from '../../../lib/finance/years';
 import DateInput from '../../../components/ui/DateInput';
 import InfoTooltip from '../../components/InfoTooltip';
 import { useAppUser } from '../../../lib/useAppUser';
@@ -590,6 +591,20 @@ export default function FinancePage() {
   const thisYear = now.getFullYear();
   const currentQuarter = Math.floor(thisMonth / 3);
 
+  // Year selectors are built from the tenant's own data rather than a fixed
+  // window, so uploaded historical statements (2023, 2024, …) stay reachable.
+  // Derived from the transactions already loaded above, so it costs no extra
+  // reads. Overview and Export offer only years that have data; the Ledger also
+  // offers next year so a forward-dated entry can still be captured.
+  const yearOptions = useMemo(
+    () => availableYears(transactions.map((t) => t.date)),
+    [transactions],
+  );
+  const ledgerYearOptions = useMemo(
+    () => availableYears(transactions.map((t) => t.date), { includeNextYear: true }),
+    [transactions],
+  );
+
   const QUARTERS = [
     { label: 'Q1 (Jan-Mar)', months: [0, 1, 2] },
     { label: 'Q2 (Apr-Jun)', months: [3, 4, 5] },
@@ -972,7 +987,7 @@ export default function FinancePage() {
                     {MONTHS.map((m, i) => <option key={m} value={i}>{m}</option>)}
                   </select>
                   <select value={overviewYear} onChange={(e) => setOverviewYear(Number(e.target.value))} className="border border-gray-300 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500">
-                    {[thisYear - 1, thisYear].map((y) => <option key={y} value={y}>{y}</option>)}
+                    {yearOptions.map((y) => <option key={y} value={y}>{y}</option>)}
                   </select>
                 </>
               )}
@@ -982,13 +997,13 @@ export default function FinancePage() {
                     {QUARTERS.map((q, i) => <option key={i} value={i}>{q.label}</option>)}
                   </select>
                   <select value={overviewYear} onChange={(e) => setOverviewYear(Number(e.target.value))} className="border border-gray-300 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500">
-                    {[thisYear - 1, thisYear].map((y) => <option key={y} value={y}>{y}</option>)}
+                    {yearOptions.map((y) => <option key={y} value={y}>{y}</option>)}
                   </select>
                 </>
               )}
               {periodType === 'year' && (
                 <select value={overviewYear} onChange={(e) => setOverviewYear(Number(e.target.value))} className="border border-gray-300 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500">
-                  {[thisYear - 1, thisYear].map((y) => <option key={y} value={y}>{y}</option>)}
+                  {yearOptions.map((y) => <option key={y} value={y}>{y}</option>)}
                 </select>
               )}
             </div>
@@ -1181,7 +1196,7 @@ export default function FinancePage() {
             <div>
               <label className="block text-xs font-semibold text-gray-500 mb-1">Year</label>
               <select value={filterYear} onChange={(e) => setFilterYear(Number(e.target.value))} className="border border-gray-300 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500">
-                {[thisYear - 1, thisYear, thisYear + 1].map((y) => <option key={y} value={y}>{y}</option>)}
+                {ledgerYearOptions.map((y) => <option key={y} value={y}>{y}</option>)}
               </select>
             </div>
             <div>
@@ -1298,7 +1313,7 @@ export default function FinancePage() {
                 <InfoTooltip text="The year of records included in the CSV file you are about to download." why="Pick the year your treasurer or auditor actually needs, otherwise the export could pull the wrong figures." />
               </label>
               <select value={exportYear} onChange={(e) => setExportYear(Number(e.target.value))} className="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500">
-                {[thisYear - 1, thisYear].map((y) => <option key={y} value={y}>{y}</option>)}
+                {yearOptions.map((y) => <option key={y} value={y}>{y}</option>)}
               </select>
             </div>
             <div className="bg-amber-50 border border-amber-200 rounded-lg px-4 py-3">
