@@ -1319,13 +1319,18 @@ export default function ManageMembershipPage() {
     setMemberWorkflows([]);
     setFeedback(null);
     setView("form");
-    // Load workflow instances for this member
-    getDocs(query(
-      collection(db, "workflow_instances"),
-      where("subjectId", "==", m.id),
-    )).then((snap) => {
-      setMemberWorkflows(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
-    });
+    // Load workflow instances for this member. The tenantId filter is required:
+    // the rules only allow tenant-scoped queries, so without it Firestore
+    // rejects the whole query and the member's workflows never show.
+    if (appUser?.tenantId) {
+      getDocs(query(
+        collection(db, "workflow_instances"),
+        where("tenantId", "==", appUser.tenantId),
+        where("subjectId", "==", m.id),
+      )).then((snap) => {
+        setMemberWorkflows(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
+      }).catch((err) => console.warn("Could not load member workflows:", err));
+    }
   };
 
   const saveException = async () => {

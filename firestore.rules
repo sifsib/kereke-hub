@@ -233,12 +233,15 @@ service cloud.firestore {
       allow read: if isSignedIn()
                   && tenantAllowed(resource)
                   && canReadMembers();
-      // Congregation member can read and update their own doc only
+      // Congregation member can read their own doc, and update only the
+      // contact fields the member portal profile page saves. Previously any
+      // field was writable, so a member could change their own status,
+      // branch, cell or church role. Covered by tests/rules/memberSelfWrite.test.ts.
       allow read: if isSignedIn() && isOwnMemberDoc(resource);
       allow update: if isSignedIn()
                     && isOwnMemberDoc(resource)
-                    && request.resource.data.tenantId == resource.data.tenantId
-                    && request.resource.data.authUid == resource.data.authUid;
+                    && request.resource.data.diff(resource.data).affectedKeys()
+                         .hasOnly(['phone', 'address', 'dateOfBirth', 'gender']);
       allow create: if isSignedIn()
                     && tenantAllowedWrite(request.resource.data)
                     && canManageMembers()
@@ -910,6 +913,21 @@ service cloud.firestore {
                             && (hasRole('owner') || hasRole('admin'))
                             && callerIsPaid();
       allow delete: if isSignedIn() && isSuperAdmin();
+    }
+
+    // ============================================
+    // TENANT SETTINGS DOCUMENTS
+    // formConfig is the Church Settings form layout, read by the roster and
+    // visitors pages. It had no rule before, so every client read and write
+    // of it was denied. Other settings documents (whatsapp) stay server-only.
+    // ============================================
+    match /tenants/{tenantId}/settings/{docId} {
+      allow read: if isSignedIn()
+                  && docId in ['formConfig']
+                  && (isSuperAdmin() || tenantId == userTenantId());
+      allow write: if isSignedIn()
+                   && docId in ['formConfig']
+                   && (isSuperAdmin() || (tenantId == userTenantId() && canEditChurchProfile()));
     }
 
     // ============================================

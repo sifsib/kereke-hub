@@ -20,7 +20,9 @@ export const TENANT_B = "tenantB";
 export const USERS = {
   ownerA: { role: "owner", tenantId: TENANT_A, status: "active" },
   adminA: { role: "admin", tenantId: TENANT_A, status: "active" },
-  memberA: { role: "congregation_member", tenantId: TENANT_A, status: "active" },
+  memberA: { role: "congregation_member", tenantId: TENANT_A, status: "active", memberId: "memberOfA" },
+  cellLeaderA: { role: "cell_leader", tenantId: TENANT_A, status: "active", assignedCellRegion: "Cell 1" },
+  memberB: { role: "congregation_member", tenantId: TENANT_B, status: "active", memberId: "memberOfB" },
   ownerB: { role: "owner", tenantId: TENANT_B, status: "active" },
   // Created by /api/login for anyone who signs in without an invite.
   // Has no tenant of their own.
@@ -59,15 +61,24 @@ export async function seed(env: RulesTestEnvironment): Promise<void> {
     }
     await setDoc(doc(db, "tenants", TENANT_A), { ...TENANT_DOC, name: "Region A" });
     await setDoc(doc(db, "tenants", TENANT_B), { ...TENANT_DOC, name: "Region B" });
+    // memberOfA and memberOfB are linked to the memberA / memberB logins.
     await setDoc(doc(db, "members", "memberOfA"), {
       tenantId: TENANT_A,
       fullName: "Test Person A",
+      status: "active",
+      authUid: "memberA",
+      phone: "27820000001",
+    });
+    await setDoc(doc(db, "members", "otherMemberOfA"), {
+      tenantId: TENANT_A,
+      fullName: "Other Person A",
       status: "active",
     });
     await setDoc(doc(db, "members", "memberOfB"), {
       tenantId: TENANT_B,
       fullName: "Test Person B",
       status: "active",
+      authUid: "memberB",
     });
   });
 }
