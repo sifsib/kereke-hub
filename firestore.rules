@@ -156,12 +156,34 @@ service cloud.firestore {
     // ============================================
     // TENANTS COLLECTION
     // ============================================
+    // Fields only the server may write: identity, billing, plan, status, slug
+    // and the reserved organisation link. Owners and admins edit everything
+    // else on the tenant doc directly from the dashboard.
+    function touchesServerOnlyTenantFields() {
+      return request.resource.data.diff(resource.data).affectedKeys().hasAny([
+        'accountType', 'plan', 'status', 'suspendedReason',
+        'tier', 'memberLimit', 'activeMemberCount', 'congregantsAtSignup',
+        'billingPhase', 'currentRate', 'paymentStatus', 'pastDueSince', 'lastDunningDay',
+        'lastPaymentAt', 'lastPaymentAmount', 'billingHold', 'grandfathered',
+        'trialEndsAt', 'evaluationEndsAt', 'fullRateStartsAt',
+        'slug', 'ownerEmail', 'signupSource', 'signupDate', 'createdAt',
+        'lastLoginAt', 'lastLoginEmail', 'orgId', 'orgRole'
+      ]);
+    }
+
     match /tenants/{tenantId} {
-      allow create: if isSignedIn();
+      // Tenants are created ONLY by /api/signup via the Admin SDK. Client create
+      // stays closed: an open create let any signed-in user write
+      // tenants/{theirUid} with accountType "internal" and pass the /api/admin
+      // route checks. Covered by tests/rules/tenants.test.ts.
+      allow create: if false;
       allow read: if isSignedIn()
                   && (isSuperAdmin() || tenantId == userTenantId());
       allow update: if isSignedIn()
-                    && (isSuperAdmin() || (tenantId == userTenantId() && canEditChurchProfile()));
+                    && (isSuperAdmin()
+                        || (tenantId == userTenantId()
+                            && canEditChurchProfile()
+                            && !touchesServerOnlyTenantFields()));
       allow delete: if isSignedIn() && isSuperAdmin();
     }
 
@@ -192,7 +214,11 @@ service cloud.firestore {
                           && request.resource.data.role == resource.data.role
                           && request.resource.data.roles == resource.data.roles
                           && request.resource.data.tenantId == resource.data.tenantId)
-                      || (sameTenant(resource) && canManageUsers())
+                      || (sameTenant(resource)
+                          && canManageUsers()
+                          && request.resource.data.tenantId == resource.data.tenantId
+                          && request.resource.data.get('role', '') != 'super_admin'
+                          && !('super_admin' in request.resource.data.get('roles', [])))
                     );
 
       allow delete: if isSignedIn()
